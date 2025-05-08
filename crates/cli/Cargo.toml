@@ -1,0 +1,10 @@
+[package]
+name = "lumen-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[[bin]]
+name = "lumen"
+path = "src/main.rs"

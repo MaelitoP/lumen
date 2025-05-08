@@ -1,0 +1,14 @@
+[workspace]
+members = [
+  "crates/core",
+  "crates/api",
+  "crates/cluster",
+  "crates/cli",
+  "crates/bench",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+authors = ["Maël LE PETIT <lumen@maelito.dev>"]
+license = "Apache-2.0"
