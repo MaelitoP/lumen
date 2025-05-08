@@ -1,0 +1,10 @@
+[package]
+name = "lumen-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[[bin]]
+name = "lumen-bench"
+path = "src/main.rs"
