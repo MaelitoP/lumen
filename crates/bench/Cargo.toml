@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+rand = "0.8"
+lipsum = "0.9"
+hdrhistogram = "7"
+tantivy = "0.22"
 
 [[bin]]
 name = "lumen-bench"

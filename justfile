@@ -16,3 +16,6 @@ clippy:
 
 bench:
     cargo run -p lumen-bench --release -- --generate 1000000
+
+dev:
+    docker compose run --rm dev bash
