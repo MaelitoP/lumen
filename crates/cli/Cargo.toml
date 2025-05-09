@@ -6,5 +6,5 @@ edition = "2021"
 [dependencies]
 
 [[bin]]
-name = "lumen"
+name = "lumen-cli"
 path = "src/main.rs"

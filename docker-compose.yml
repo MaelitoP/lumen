@@ -1,0 +1,10 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/opt/lumen:cached
+    working_dir: /opt/lumen
+    entrypoint: ["sh", "-c"]
+    command: ["sleep infinity"]
