@@ -1,21 +1,28 @@
 set shell := ["zsh", "-c"]
 
-default: build
+docker_service := "dev"
+
+default:
+    @just --list
 
 build:
-    cargo build --workspace
+    @cargo build --workspace
 
 test:
-    cargo test --workspace
+    @cargo test --workspace
 
 fmt:
-    cargo fmt --all --check
+    @cargo fmt --all --check
 
 clippy:
-    cargo clippy --all-targets --all-features -- -D warnings
+    @cargo clippy --all-targets --all-features -- -D warnings
 
-bench:
-    cargo run -p lumen-bench --release -- --generate 1000000
+bench target="lumen-bench" count="100000":
+    @docker compose up -d
+    @docker compose exec {{docker_service}} cargo run -p {{target}} --release -- --generate {{count}}
 
-dev:
-    docker compose run --rm dev bash
+docker_dev:
+    @docker compose run --rm {{docker_service}} bash
+
+docker_build:
+    @docker compose build --no-cache

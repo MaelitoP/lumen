@@ -11,7 +11,7 @@ use tantivy::schema::*;
 use tantivy::{doc, Index};
 
 #[derive(Parser, Debug)]
-#[command(about = "Lumen baseline ingest/search benchmark" )]
+#[command(about = "Lumen baseline ingest/search benchmark")]
 struct Args {
     #[arg(long, default_value_t = 1_000_000)]
     generate: u64,
@@ -37,7 +37,15 @@ fn main() -> tantivy::Result<()> {
 
     let mut writer = index.writer(256 * 1024 * 1024)?; // 256 MB mem‑budget
     let mut rng = rand::thread_rng();
-    let lorem_words = ["lorem", "ipsum", "dolor", "amet", "consectetur", "adipiscing", "elit"];
+    let lorem_words = [
+        "lorem",
+        "ipsum",
+        "dolor",
+        "amet",
+        "consectetur",
+        "adipiscing",
+        "elit",
+    ];
 
     println!("Ingesting {} docs…", args.generate);
     let ingest_start = Instant::now();
@@ -46,13 +54,18 @@ fn main() -> tantivy::Result<()> {
             title => format!("Document #{i}"),
             body  => format!("{} {} {}", lorem_words[rng.gen_range(0..7)], lipsum( rng.gen_range(10..30) ), i),
         );
-        writer.add_document(doc);
-        if i % 100_000 == 0 && i != 0 { println!("  …{} docs", i); }
+        let _ = writer.add_document(doc);
+        if i % 100_000 == 0 && i != 0 {
+            println!("  …{} docs", i);
+        }
     }
     writer.commit()?;
     let ingest_elapsed = ingest_start.elapsed();
 
-    println!("Ingest throughput: {:.1} docs/s", args.generate as f64 / ingest_elapsed.as_secs_f64());
+    println!(
+        "Ingest throughput: {:.1} docs/s",
+        args.generate as f64 / ingest_elapsed.as_secs_f64()
+    );
 
     let reader = index.reader()?;
     let searcher = reader.searcher();
