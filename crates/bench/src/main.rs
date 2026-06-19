@@ -52,7 +52,7 @@ fn main() -> tantivy::Result<()> {
     for i in 0..args.generate {
         let doc = doc!(
             title => format!("Document #{i}"),
-            body  => format!("{} {} {}", lorem_words[rng.gen_range(0..7)], lipsum( rng.gen_range(10..30) ), i),
+            body  => format!("{} {} {}", lorem_words[rng.gen_range(0..lorem_words.len())], lipsum(rng.gen_range(10..30)), i),
         );
         let _ = writer.add_document(doc);
         if i % 100_000 == 0 && i != 0 {
