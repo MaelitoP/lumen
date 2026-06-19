@@ -483,8 +483,8 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "lipsum",
+ "lumen-core",
  "rand",
- "tantivy",
 ]
 
 [[package]]
@@ -498,6 +498,10 @@ version = "0.1.0"
 [[package]]
 name = "lumen-core"
 version = "0.1.0"
+dependencies = [
+ "tantivy",
+ "tempfile",
+]
 
 [[package]]
 name = "lz4_flex"

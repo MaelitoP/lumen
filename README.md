@@ -27,16 +27,19 @@ implemented yet beyond the single-node benchmark below.
 
 ## Current status
 
-| Crate           | Purpose (intended)                     | Status                              |
-| --------------- | -------------------------------------- | ----------------------------------- |
-| `lumen-bench`   | Single-node Tantivy ingest/query spike | Implemented and runnable            |
-| `lumen-core`    | Index and shard logic                  | Placeholder — not implemented       |
-| `lumen-api`     | REST/JSON gateway                      | Placeholder — not implemented       |
-| `lumen-cluster` | Cluster metadata and coordination      | Placeholder — not implemented       |
-| `lumen-cli`     | Administration CLI                     | Stub — prints a work-in-progress line |
+| Crate           | Purpose (intended)                     | Status                                   |
+| --------------- | -------------------------------------- | ---------------------------------------- |
+| `lumen-core`    | Index and shard logic                  | Minimal `Index` (open/add/commit/search) |
+| `lumen-bench`   | Single-node Tantivy ingest/query spike | Implemented and runnable                 |
+| `lumen-api`     | REST/JSON gateway                      | Placeholder — not implemented            |
+| `lumen-cluster` | Cluster metadata and coordination      | Placeholder — not implemented            |
+| `lumen-cli`     | Administration CLI                     | Stub — prints a work-in-progress line    |
 
-The only component that does real work today is the benchmark. The other crates
-are empty placeholders that mark where planned work would go.
+What works today is a single-node index: `lumen-core` wraps a fixed
+`title`/`body` Tantivy schema behind a small `Index` abstraction, covered by an
+integration test, and `lumen-bench` drives it to measure ingest and query
+performance (see [`BENCHMARKS.md`](BENCHMARKS.md)). The `api`, `cluster`, and
+`cli` crates are still placeholders that mark where planned work would go.
 
 ## Building
 

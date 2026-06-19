@@ -1,14 +1,13 @@
-//! # Lumen Bench – single‑node spike
-//! Ingest `--generate N` synthetic docs into a Tantivy index and measure a sample query.
+//! # Lumen Bench – single-node spike
+//! Ingest `--generate N` synthetic docs through `lumen-core` and measure a sample query.
+
+use std::path::PathBuf;
+use std::time::Instant;
 
 use clap::Parser;
 use lipsum::lipsum;
+use lumen_core::Index;
 use rand::Rng;
-use std::path::PathBuf;
-use std::time::Instant;
-use tantivy::collector::TopDocs;
-use tantivy::schema::*;
-use tantivy::{doc, Index};
 
 #[derive(Parser, Debug)]
 #[command(about = "Lumen baseline ingest/search benchmark")]
@@ -20,22 +19,10 @@ struct Args {
     index_path: PathBuf,
 }
 
-fn main() -> tantivy::Result<()> {
+fn main() -> lumen_core::Result<()> {
     let args = Args::parse();
+    let mut index = Index::open(&args.index_path, 256 * 1024 * 1024)?;
 
-    let mut schema_builder = Schema::builder();
-    let title = schema_builder.add_text_field("title", TEXT | STORED);
-    let body = schema_builder.add_text_field("body", TEXT);
-    let schema = schema_builder.build();
-
-    let index = if args.index_path.exists() {
-        Index::open_in_dir(&args.index_path)?
-    } else {
-        std::fs::create_dir_all(&args.index_path)?;
-        Index::create_in_dir(&args.index_path, schema.clone())?
-    };
-
-    let mut writer = index.writer(256 * 1024 * 1024)?; // 256 MB mem‑budget
     let mut rng = rand::thread_rng();
     let lorem_words = [
         "lorem",
@@ -50,16 +37,18 @@ fn main() -> tantivy::Result<()> {
     println!("Ingesting {} docs…", args.generate);
     let ingest_start = Instant::now();
     for i in 0..args.generate {
-        let doc = doc!(
-            title => format!("Document #{i}"),
-            body  => format!("{} {} {}", lorem_words[rng.gen_range(0..lorem_words.len())], lipsum(rng.gen_range(10..30)), i),
+        let body = format!(
+            "{} {} {}",
+            lorem_words[rng.gen_range(0..lorem_words.len())],
+            lipsum(rng.gen_range(10..30)),
+            i
         );
-        let _ = writer.add_document(doc);
+        index.add_document(&format!("Document #{i}"), &body)?;
         if i % 100_000 == 0 && i != 0 {
             println!("  …{} docs", i);
         }
     }
-    writer.commit()?;
+    index.commit()?;
     let ingest_elapsed = ingest_start.elapsed();
 
     println!(
@@ -67,17 +56,12 @@ fn main() -> tantivy::Result<()> {
         args.generate as f64 / ingest_elapsed.as_secs_f64()
     );
 
-    let reader = index.reader()?;
-    let searcher = reader.searcher();
-    let qp = tantivy::query::QueryParser::for_index(&index, vec![title, body]);
-    let query = qp.parse_query("lorem ipsum")?;
-
     let query_start = Instant::now();
-    let top_docs = searcher.search(&query, &TopDocs::with_limit(10))?;
+    let hits = index.search("lorem ipsum", 10)?;
     let query_elapsed = query_start.elapsed();
 
-    println!("Query latency: {:?}", query_elapsed);
-    println!("Top docs IDs: {:?}", top_docs);
+    println!("Query latency: {query_elapsed:?}");
+    println!("Top hits: {}", hits.len());
 
     Ok(())
 }
