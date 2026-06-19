@@ -17,10 +17,19 @@ struct Args {
 
     #[arg(long, default_value = "bench-index")]
     index_path: PathBuf,
+
+    /// Delete the index directory before ingesting, so the run measures a fresh index.
+    #[arg(long)]
+    fresh: bool,
 }
 
 fn main() -> lumen_core::Result<()> {
     let args = Args::parse();
+
+    if args.fresh && args.index_path.exists() {
+        std::fs::remove_dir_all(&args.index_path)?;
+    }
+
     let mut index = Index::open(&args.index_path, 256 * 1024 * 1024)?;
 
     let mut rng = rand::thread_rng();

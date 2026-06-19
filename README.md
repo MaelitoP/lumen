@@ -73,8 +73,11 @@ Flags:
 
 - `--generate N` — number of synthetic documents to index (default: 1,000,000).
 - `--index-path PATH` — index directory (default: `bench-index`, gitignored).
+- `--fresh` — delete the index directory first, so the run measures a fresh index.
 
-The index directory is reused across runs if it already exists.
+Without `--fresh`, an existing index directory is reused and the new documents
+are appended to it, which skews throughput and latency. Use `--fresh` (or delete
+the directory) when you want a clean measurement.
 
 ## Development
 
