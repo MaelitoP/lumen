@@ -50,11 +50,13 @@ git clone https://github.com/MaelitoP/lumen && cd lumen
 cargo build --workspace
 ```
 
-On macOS, Tantivy's zstd dependency links against libiconv:
+On macOS, Tantivy's `zstd-sys` dependency links against libiconv, and the
+linker needs to be told where Homebrew keeps it (otherwise the build fails with
+`ld: library not found for -liconv`):
 
 ```bash
 brew install libiconv
-export LIBICONV_LIB_DIR=$(brew --prefix libiconv)/lib
+export LIBRARY_PATH="$(brew --prefix libiconv)/lib"
 cargo build --workspace
 ```
 
