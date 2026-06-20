@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package lumen.v1;
+
+message Command {
+  oneof op {
+    IndexDocument index_document = 1;
+    DeleteDocument delete_document = 2;
+    CreateCollection create_collection = 3;
+    DropCollection drop_collection = 4;
+  }
+}
+
+message IndexDocument {
+  string collection = 1;
+  string id = 2;
+  bytes source = 3;
+}
+
+message DeleteDocument {
+  string collection = 1;
+  string id = 2;
+}
+
+message CreateCollection {
+  string collection = 1;
+  Mapping mapping = 2;
+}
+
+message DropCollection {
+  string collection = 1;
+}
+
+message Mapping {
+  repeated Field fields = 1;
+}
+
+message Field {
+  string name = 1;
+  FieldType type = 2;
+  bool indexed = 3;
+  bool fast = 4;
+}
+
+enum FieldType {
+  FIELD_TYPE_UNSPECIFIED = 0;
+  FIELD_TYPE_TEXT = 1;
+  FIELD_TYPE_KEYWORD = 2;
+  FIELD_TYPE_I64 = 3;
+  FIELD_TYPE_F64 = 4;
+  FIELD_TYPE_DATE = 5;
+}
+
+message WalEntry {
+  uint64 seq = 1;
+  Command command = 2;
+}
