@@ -3,4 +3,5 @@ target/
 bench-index/
 .DS_Store
 docs/
+.claude/
 **/*.rs.bk
