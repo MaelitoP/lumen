@@ -57,6 +57,10 @@ impl Mapping {
         Ok(Self { fields })
     }
 
+    pub fn field(&self, name: &str) -> Option<&FieldSpec> {
+        self.fields.get(name)
+    }
+
     pub fn to_schema(&self) -> Schema {
         let mut builder = Schema::builder();
         builder.add_text_field(ID_FIELD, STRING.set_stored());
