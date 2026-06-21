@@ -19,3 +19,10 @@ pub enum Error {
     #[error(transparent)]
     Tantivy(#[from] tantivy::TantivyError),
 }
+
+// Errors must stay boxable as `dyn Error + Send + Sync + 'static` to cross thread and
+// framework boundaries; this fails the build if a variant ever breaks that.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync + 'static>() {}
+    assert_send_sync::<Error>();
+};
