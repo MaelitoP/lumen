@@ -12,6 +12,8 @@ pub enum Error {
     Validation(String),
     #[error("document not found: {0}")]
     DocumentNotFound(String),
+    #[error("catalog recovery failed: {0}")]
+    Recovery(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
