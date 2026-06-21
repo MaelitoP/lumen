@@ -64,7 +64,7 @@ impl Collection {
         &self.mapping
     }
 
-    pub fn upsert(&self, id: Option<&str>, source: &[u8]) -> Result<Upserted> {
+    pub(crate) fn upsert(&self, _seq: u64, id: Option<&str>, source: &[u8]) -> Result<Upserted> {
         let parsed: Value = serde_json::from_slice(source)
             .map_err(|e| Error::Validation(format!("invalid JSON: {e}")))?;
         self.mapping.validate_document(&parsed)?;
@@ -82,7 +82,7 @@ impl Collection {
         Ok(Upserted { id, created })
     }
 
-    pub fn delete(&self, id: &str) -> Result<bool> {
+    pub(crate) fn delete(&self, _seq: u64, id: &str) -> Result<bool> {
         let mut writer = self.writer.lock().expect("writer poisoned");
         let existed = self.id_exists(id)?;
         writer.delete_term(self.id_term(id));

@@ -9,7 +9,7 @@ use lumen_proto::v1 as proto;
 use prost::Message;
 use uuid::Uuid;
 
-use crate::collection::Collection;
+use crate::collection::{Collection, Upserted};
 use crate::error::{Error, Result};
 use crate::mapping::Mapping;
 
@@ -29,7 +29,7 @@ struct Entry {
 pub struct Catalog {
     root: PathBuf,
     seq: AtomicU64,
-    ddl: Mutex<()>,
+    write: Mutex<()>,
     collections: Mutex<HashMap<String, Entry>>,
 }
 
@@ -87,14 +87,14 @@ impl Catalog {
         Ok(Self {
             root,
             seq: AtomicU64::new(max_seq),
-            ddl: Mutex::new(()),
+            write: Mutex::new(()),
             collections: Mutex::new(collections),
         })
     }
 
     pub fn create(&self, name: &str, mapping: Mapping) -> Result<Arc<Collection>> {
         validate_name(name)?;
-        let _ddl = self.ddl.lock().expect("ddl poisoned");
+        let _write = self.write.lock().expect("write lock poisoned");
 
         match self.get(name) {
             Ok(existing) if existing.mapping() == &mapping => return Ok(existing),
@@ -128,7 +128,7 @@ impl Catalog {
     }
 
     pub fn drop(&self, name: &str) -> Result<()> {
-        let _ddl = self.ddl.lock().expect("ddl poisoned");
+        let _write = self.write.lock().expect("write lock poisoned");
 
         let (uuid, created_seq, collection) = {
             let map = self.collections();
@@ -156,6 +156,23 @@ impl Catalog {
         fs::remove_dir_all(self.root.join(uuid.to_string()))?;
         fsync_dir(&self.root)?;
         Ok(())
+    }
+
+    pub fn upsert_document(
+        &self,
+        collection: &str,
+        id: Option<&str>,
+        source: &[u8],
+    ) -> Result<Upserted> {
+        let _write = self.write.lock().expect("write lock poisoned");
+        let seq = self.next_seq();
+        self.get(collection)?.upsert(seq, id, source)
+    }
+
+    pub fn delete_document(&self, collection: &str, id: &str) -> Result<bool> {
+        let _write = self.write.lock().expect("write lock poisoned");
+        let seq = self.next_seq();
+        self.get(collection)?.delete(seq, id)
     }
 
     pub fn get(&self, name: &str) -> Result<Arc<Collection>> {
