@@ -111,7 +111,7 @@ fn drop_collection_before_crash_recovers() {
         let catalog = Catalog::open(dir.path()).unwrap();
         catalog.create("books", mapping()).unwrap();
         catalog.checkpoint().unwrap();
-        catalog.drop("books").unwrap();
+        catalog.drop_collection("books").unwrap();
         // the drop is WAL-durable but not checkpointed.
     }
 
@@ -128,7 +128,7 @@ fn index_for_dropped_collection_is_skipped() {
         catalog
             .upsert_document("books", Some("b1"), br#"{"title":"x"}"#)
             .unwrap();
-        catalog.drop("books").unwrap();
+        catalog.drop_collection("books").unwrap();
         // create + index + drop all live only in the WAL; replay must skip the index.
     }
 

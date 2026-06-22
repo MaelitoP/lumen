@@ -49,7 +49,7 @@ pub(crate) async fn drop_collection(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    run(state.catalog, move |c| c.drop(&name)).await?;
+    run(state.catalog, move |c| c.drop_collection(&name)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

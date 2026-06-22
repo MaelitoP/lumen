@@ -47,11 +47,9 @@ pub(crate) fn execute(
     let mut hits = Vec::with_capacity(top.len());
     for (score, address) in top {
         let doc: TantivyDocument = searcher.doc(address)?;
-        hits.push(SearchHit {
-            id: text_field(&doc, id_field, ID_FIELD),
-            score,
-            source: bytes_field(&doc, source_field, SOURCE_FIELD),
-        });
+        let id = text_field(&doc, id_field, ID_FIELD)?;
+        let source = bytes_field(&doc, source_field, SOURCE_FIELD)?;
+        hits.push(SearchHit { id, score, source });
     }
     Ok(SearchResults { hits, total })
 }
@@ -73,7 +71,7 @@ pub(crate) fn source_by_id(
     match top.first() {
         Some(&(_, address)) => {
             let doc: TantivyDocument = searcher.doc(address)?;
-            Ok(Some(bytes_field(&doc, source_field, SOURCE_FIELD)))
+            Ok(Some(bytes_field(&doc, source_field, SOURCE_FIELD)?))
         }
         None => Ok(None),
     }
@@ -100,16 +98,16 @@ fn default_fields(schema: &Schema) -> Vec<Field> {
         .collect()
 }
 
-fn text_field(doc: &TantivyDocument, field: Field, name: &str) -> String {
+fn text_field(doc: &TantivyDocument, field: Field, name: &str) -> Result<String> {
     doc.get_first(field)
         .and_then(|value| value.as_str())
         .map(str::to_owned)
-        .unwrap_or_else(|| panic!("stored document missing system field {name}"))
+        .ok_or_else(|| Error::Recovery(format!("stored document missing system field {name}")))
 }
 
-fn bytes_field(doc: &TantivyDocument, field: Field, name: &str) -> Vec<u8> {
+fn bytes_field(doc: &TantivyDocument, field: Field, name: &str) -> Result<Vec<u8>> {
     doc.get_first(field)
         .and_then(|value| value.as_bytes())
         .map(<[u8]>::to_vec)
-        .unwrap_or_else(|| panic!("stored document missing system field {name}"))
+        .ok_or_else(|| Error::Recovery(format!("stored document missing system field {name}")))
 }

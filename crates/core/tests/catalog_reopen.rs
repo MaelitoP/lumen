@@ -43,7 +43,7 @@ fn create_list_describe_drop() {
     );
     assert_eq!(catalog.describe("books").unwrap(), mapping());
 
-    catalog.drop("books").unwrap();
+    catalog.drop_collection("books").unwrap();
     assert_eq!(catalog.list(), vec!["movies".to_string()]);
     assert!(matches!(
         catalog.get("books"),
@@ -58,7 +58,7 @@ fn reopen_restores_catalog() {
         let catalog = Catalog::open(dir.path()).unwrap();
         catalog.create("books", mapping()).unwrap();
         catalog.create("movies", mapping()).unwrap();
-        catalog.drop("movies").unwrap();
+        catalog.drop_collection("movies").unwrap();
     }
 
     let catalog = Catalog::open(dir.path()).unwrap();
@@ -148,7 +148,7 @@ fn drop_removes_data_dir() {
     let data = dir.path().join(uuid.to_string());
     assert!(data.exists());
 
-    catalog.drop("books").unwrap();
+    catalog.drop_collection("books").unwrap();
     assert!(!data.exists());
 }
 

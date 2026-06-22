@@ -150,9 +150,10 @@ fn invalid_document_does_not_replace_existing() {
     catalog
         .upsert_document("books", Some("b1"), br#"{"title":"keep"}"#)
         .unwrap();
-    assert!(catalog
-        .upsert_document("books", Some("b1"), br#"{"unmapped":1}"#)
-        .is_err());
+    assert!(matches!(
+        catalog.upsert_document("books", Some("b1"), br#"{"unmapped":1}"#),
+        Err(Error::Validation(_))
+    ));
     assert_eq!(search(&catalog, "keep", 10, 0).total, 1);
 }
 

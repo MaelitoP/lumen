@@ -249,7 +249,7 @@ impl Catalog {
         })
     }
 
-    pub fn drop(&self, name: &str) -> Result<()> {
+    pub fn drop_collection(&self, name: &str) -> Result<()> {
         let mut wal = self.wal.lock().expect("write lock poisoned");
         let uuid = self
             .collections()

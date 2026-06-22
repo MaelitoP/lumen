@@ -7,6 +7,7 @@ mod error;
 mod handlers;
 
 use anyhow::Context;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post, put};
 use axum::{http::StatusCode, Router};
 use clap::Parser;
@@ -18,6 +19,7 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "lumen", about = "Lumen single-node document database")]
@@ -59,6 +61,7 @@ pub fn router(state: AppState) -> Router {
                 .get(handlers::get_document)
                 .delete(handlers::delete_document),
         )
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
