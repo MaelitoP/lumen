@@ -247,3 +247,78 @@ async fn index_into_missing_collection_is_not_found() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["type"], "collection_not_found");
 }
+
+#[tokio::test]
+async fn drop_missing_collection_is_not_found() {
+    let (_dir, state) = state();
+    let (status, body) = call(&state, Method::DELETE, "/collections/ghost", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["type"], "collection_not_found");
+}
+
+#[tokio::test]
+async fn document_verbs_on_missing_collection_are_not_found() {
+    let (_dir, state) = state();
+    for (method, uri) in [
+        (Method::PUT, "/collections/ghost/documents/x"),
+        (Method::GET, "/collections/ghost/documents/x"),
+        (Method::DELETE, "/collections/ghost/documents/x"),
+        (Method::GET, "/collections/ghost/documents/search?q=x"),
+    ] {
+        let (status, body) = call(&state, method, uri, r#"{"title":"x"}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+        assert_eq!(body["error"]["type"], "collection_not_found", "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn delete_missing_document_is_idempotent() {
+    let (_dir, state) = state();
+    create_books(&state).await;
+    let (status, _) = call(
+        &state,
+        Method::DELETE,
+        "/collections/books/documents/absent",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn search_honors_limit_and_offset() {
+    let (_dir, state) = state();
+    create_books(&state).await;
+    for id in ["a", "b", "c"] {
+        call(
+            &state,
+            Method::PUT,
+            &format!("/collections/books/documents/{id}"),
+            r#"{"title":"shared tale"}"#,
+        )
+        .await;
+    }
+    state.catalog.checkpoint().expect("checkpoint");
+
+    let (status, body) = call(
+        &state,
+        Method::GET,
+        "/collections/books/documents/search?q=shared&limit=2&offset=0",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 3);
+    assert_eq!(body["hits"].as_array().expect("hits").len(), 2);
+
+    let (status, body) = call(
+        &state,
+        Method::GET,
+        "/collections/books/documents/search?q=shared&limit=2&offset=2",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 3);
+    assert_eq!(body["hits"].as_array().expect("hits").len(), 1);
+}
