@@ -4,9 +4,17 @@ version = "0.1.0"
 edition = "2021"
 rust-version.workspace = true
 
+[features]
+grpc = ["dep:tonic", "dep:tonic-prost", "dep:openraft"]
+
+# tonic pinned to =0.14.3: 0.14.4+ build crates require rustc 1.88, repo is on 1.85.
 [dependencies]
-prost = "0.13"
+prost = "0.14"
+tonic = { version = "=0.14.3", optional = true }
+tonic-prost = { version = "=0.14.3", optional = true }
+openraft = { version = "0.9.24", optional = true }
 
 [build-dependencies]
-prost-build = "0.13"
+tonic-prost-build = "=0.14.3"
+tonic-build = "=0.14.3"
 protoc-bin-vendored = "3"

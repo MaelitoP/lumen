@@ -2,6 +2,16 @@ pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/lumen.v1.rs"));
 }
 
+#[cfg(feature = "grpc")]
+pub mod raft {
+    include!(concat!(env!("OUT_DIR"), "/lumen.raft.v1.rs"));
+}
+
+#[cfg(feature = "grpc")]
+mod conversions;
+#[cfg(feature = "grpc")]
+pub use conversions::ConversionError;
+
 #[cfg(test)]
 mod tests {
     use super::v1::*;

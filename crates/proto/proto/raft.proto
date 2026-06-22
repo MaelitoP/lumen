@@ -1,0 +1,134 @@
+syntax = "proto3";
+
+package lumen.raft.v1;
+
+import "lumen.proto";
+
+message Unit {}
+
+message LeaderId {
+  uint64 term = 1;
+  uint64 node_id = 2;
+}
+
+message Vote {
+  LeaderId leader_id = 1;
+  bool committed = 2;
+}
+
+message LogId {
+  LeaderId leader_id = 1;
+  uint64 index = 2;
+}
+
+message Node {
+  uint64 node_id = 1;
+  string rpc_addr = 2;
+}
+
+message NodeIdSet {
+  repeated uint64 node_ids = 1;
+}
+
+message Membership {
+  repeated NodeIdSet configs = 1;
+  map<uint64, Node> nodes = 2;
+}
+
+message StoredMembership {
+  LogId log_id = 1;
+  Membership membership = 2;
+}
+
+message Entry {
+  LogId log_id = 1;
+  oneof payload {
+    Unit blank = 2;
+    lumen.v1.Command normal = 3;
+    Membership membership = 4;
+  }
+}
+
+message SnapshotMeta {
+  LogId last_log_id = 1;
+  StoredMembership last_membership = 2;
+  string snapshot_id = 3;
+}
+
+message VoteRequest {
+  Vote vote = 1;
+  LogId last_log_id = 2;
+}
+
+message VoteResponse {
+  Vote vote = 1;
+  bool vote_granted = 2;
+  LogId last_log_id = 3;
+}
+
+message AppendEntriesRequest {
+  Vote vote = 1;
+  LogId prev_log_id = 2;
+  repeated Entry entries = 3;
+  LogId leader_commit = 4;
+}
+
+message PartialSuccess {
+  LogId matching = 1;
+}
+
+message AppendEntriesResponse {
+  oneof result {
+    Unit success = 1;
+    PartialSuccess partial_success = 2;
+    Unit conflict = 3;
+    Vote higher_vote = 4;
+  }
+}
+
+message SnapshotRequest {
+  Vote vote = 1;
+  SnapshotMeta meta = 2;
+  bytes data = 3;
+}
+
+message SnapshotResponse {
+  Vote vote = 1;
+}
+
+service RaftService {
+  rpc Vote(VoteRequest) returns (VoteResponse);
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+  rpc Snapshot(stream SnapshotRequest) returns (SnapshotResponse);
+}
+
+message InitRequest {
+  map<uint64, Node> nodes = 1;
+}
+
+message InitResponse {}
+
+message AddLearnerRequest {
+  Node node = 1;
+}
+
+message AddLearnerResponse {}
+
+message ChangeMembershipRequest {
+  repeated uint64 members = 1;
+  bool retain = 2;
+}
+
+message ChangeMembershipResponse {}
+
+message MetricsRequest {}
+
+message MetricsResponse {
+  uint64 id = 1;
+  uint64 current_term = 2;
+  string state = 3;
+  optional uint64 current_leader = 4;
+  LogId last_log_id = 5;
+  LogId last_applied = 6;
+  Membership membership = 7;
+}
