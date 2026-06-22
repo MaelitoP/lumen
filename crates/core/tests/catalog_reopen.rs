@@ -73,7 +73,9 @@ fn idempotent_create_and_schema_conflict() {
 
     let first = catalog.create("books", mapping()).unwrap();
     let again = catalog.create("books", mapping()).unwrap();
-    assert_eq!(first.uuid(), again.uuid());
+    assert!(first.created);
+    assert!(!again.created);
+    assert_eq!(first.collection.uuid(), again.collection.uuid());
 
     assert!(matches!(
         catalog.create("books", other_mapping()),
@@ -121,7 +123,11 @@ fn missing_dir_is_recovery_error() {
     let dir = tempdir().unwrap();
     let uuid = {
         let catalog = Catalog::open(dir.path()).unwrap();
-        let uuid = catalog.create("books", mapping()).unwrap().uuid();
+        let uuid = catalog
+            .create("books", mapping())
+            .unwrap()
+            .collection
+            .uuid();
         catalog.checkpoint().unwrap();
         uuid
     };
@@ -134,7 +140,11 @@ fn missing_dir_is_recovery_error() {
 fn drop_removes_data_dir() {
     let dir = tempdir().unwrap();
     let catalog = Catalog::open(dir.path()).unwrap();
-    let uuid = catalog.create("books", mapping()).unwrap().uuid();
+    let uuid = catalog
+        .create("books", mapping())
+        .unwrap()
+        .collection
+        .uuid();
     let data = dir.path().join(uuid.to_string());
     assert!(data.exists());
 

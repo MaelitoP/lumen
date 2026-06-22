@@ -41,10 +41,7 @@ pub(crate) fn execute(
         });
     }
 
-    let id_field = schema.get_field(ID_FIELD).expect("schema always has _id");
-    let source_field = schema
-        .get_field(SOURCE_FIELD)
-        .expect("schema always has _source");
+    let (id_field, source_field) = system_fields(&schema);
 
     let top = searcher.search(&query, &TopDocs::with_limit(limit).and_offset(offset))?;
     let mut hits = Vec::with_capacity(top.len());
@@ -65,10 +62,7 @@ pub(crate) fn source_by_id(
     id: &str,
 ) -> Result<Option<Vec<u8>>> {
     let schema = index.schema();
-    let id_field = schema.get_field(ID_FIELD).expect("schema always has _id");
-    let source_field = schema
-        .get_field(SOURCE_FIELD)
-        .expect("schema always has _source");
+    let (id_field, source_field) = system_fields(&schema);
 
     let query = TermQuery::new(
         Term::from_field_text(id_field, id),
@@ -83,6 +77,15 @@ pub(crate) fn source_by_id(
         }
         None => Ok(None),
     }
+}
+
+fn system_fields(schema: &Schema) -> (Field, Field) {
+    (
+        schema.get_field(ID_FIELD).expect("schema always has _id"),
+        schema
+            .get_field(SOURCE_FIELD)
+            .expect("schema always has _source"),
+    )
 }
 
 fn default_fields(schema: &Schema) -> Vec<Field> {

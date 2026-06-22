@@ -42,6 +42,12 @@ pub struct Catalog {
     collections: Mutex<HashMap<String, Entry>>,
 }
 
+#[derive(Debug)]
+pub struct Created {
+    pub collection: Arc<Collection>,
+    pub created: bool,
+}
+
 impl Catalog {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
@@ -198,12 +204,17 @@ impl Catalog {
         Ok(catalog)
     }
 
-    pub fn create(&self, name: &str, mapping: Mapping) -> Result<Arc<Collection>> {
+    pub fn create(&self, name: &str, mapping: Mapping) -> Result<Created> {
         validate_name(name)?;
         let mut wal = self.wal.lock().expect("write lock poisoned");
 
         match self.get(name) {
-            Ok(existing) if existing.mapping() == &mapping => return Ok(existing),
+            Ok(existing) if existing.mapping() == &mapping => {
+                return Ok(Created {
+                    collection: existing,
+                    created: false,
+                })
+            }
             Ok(_) => {
                 return Err(Error::SchemaConflict {
                     name: name.to_owned(),
@@ -232,7 +243,10 @@ impl Catalog {
                 collection: Arc::clone(&collection),
             },
         );
-        Ok(collection)
+        Ok(Created {
+            collection,
+            created: true,
+        })
     }
 
     pub fn drop(&self, name: &str) -> Result<()> {

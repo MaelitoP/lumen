@@ -7,6 +7,7 @@ use serde_json::json;
 #[derive(Debug)]
 pub enum ApiError {
     Core(Error),
+    Mapping(String),
     Internal,
 }
 
@@ -18,22 +19,25 @@ impl From<Error> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let error = match self {
-            ApiError::Core(error) => error,
+        let (status, kind, message) = match self {
+            ApiError::Mapping(message) => (StatusCode::BAD_REQUEST, "mapping", message),
             ApiError::Internal => return internal("internal error"),
-        };
-        let (status, kind) = match &error {
-            Error::CollectionNotFound(_) => (StatusCode::NOT_FOUND, "collection_not_found"),
-            Error::DocumentNotFound(_) => (StatusCode::NOT_FOUND, "document_not_found"),
-            Error::SchemaConflict { .. } => (StatusCode::CONFLICT, "schema_conflict"),
-            Error::Validation(_) => (StatusCode::BAD_REQUEST, "validation"),
-            Error::Mapping(_) => (StatusCode::BAD_REQUEST, "mapping"),
-            Error::Recovery(_) | Error::Io(_) | Error::Tantivy(_) => {
-                tracing::error!(%error, "internal error");
-                return internal("internal error");
+            ApiError::Core(error) => {
+                let (status, kind) = match &error {
+                    Error::CollectionNotFound(_) => (StatusCode::NOT_FOUND, "collection_not_found"),
+                    Error::DocumentNotFound(_) => (StatusCode::NOT_FOUND, "document_not_found"),
+                    Error::SchemaConflict { .. } => (StatusCode::CONFLICT, "schema_conflict"),
+                    Error::Validation(_) => (StatusCode::BAD_REQUEST, "validation"),
+                    Error::Mapping(_) => (StatusCode::BAD_REQUEST, "mapping"),
+                    Error::Recovery(_) | Error::Io(_) | Error::Tantivy(_) => {
+                        tracing::error!(%error, "internal error");
+                        return internal("internal error");
+                    }
+                };
+                (status, kind, error.to_string())
             }
         };
-        body(status, kind, &error.to_string())
+        body(status, kind, &message)
     }
 }
 

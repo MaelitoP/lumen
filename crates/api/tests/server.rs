@@ -40,7 +40,7 @@ const MAPPING: &str = r#"{"fields":{"title":{"type":"text","indexed":true},"year
 
 async fn create_books(state: &AppState) {
     let (status, _) = call(state, Method::PUT, "/collections/books", MAPPING).await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::CREATED);
 }
 
 #[test]

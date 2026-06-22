@@ -19,13 +19,15 @@ pub(crate) async fn create_collection(
     Path(name): Path<String>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
-    let mapping: Mapping = serde_json::from_slice(&body)
-        .map_err(|e| ApiError::Core(lumen_core::Error::Mapping(e.to_string())))?;
-    let mapping = run(state.catalog, move |c| {
-        c.create(&name, mapping).map(|col| col.mapping().clone())
-    })
-    .await?;
-    Ok((StatusCode::OK, Json(mapping)))
+    let mapping: Mapping =
+        serde_json::from_slice(&body).map_err(|e| ApiError::Mapping(e.to_string()))?;
+    let created = run(state.catalog, move |c| c.create(&name, mapping)).await?;
+    let status = if created.created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(created.collection.mapping().clone())))
 }
 
 pub(crate) async fn list_collections(
@@ -137,7 +139,11 @@ where
 fn index_response(id: &str, created: bool) -> IndexResponse {
     IndexResponse {
         id: id.to_owned(),
-        result: if created { "created" } else { "updated" },
+        result: if created {
+            WriteResult::Created
+        } else {
+            WriteResult::Updated
+        },
     }
 }
 
@@ -167,38 +173,45 @@ fn parse_source(bytes: Vec<u8>) -> Result<Value, ApiError> {
     })
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct ListResponse {
     collections: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct IndexResponse {
     id: String,
-    result: &'static str,
+    result: WriteResult,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum WriteResult {
+    Created,
+    Updated,
+}
+
+#[derive(Debug, Serialize)]
 struct GetResponse {
     id: String,
     source: Value,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct SearchResponse {
     hits: Vec<Hit>,
     total: usize,
     took_ms: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct Hit {
     id: String,
     score: f32,
     source: Value,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub(crate) struct SearchParams {
     #[serde(default)]
     q: String,
