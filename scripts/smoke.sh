@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# End-to-end smoke test for the Lumen HTTP API: drives a real server process
-# through collection + document CRUD, search, error paths, and crash recovery
-# (kill -9 followed by restart). Runs with a 1s checkpoint interval so indexed
-# documents become searchable promptly.
+# Smoke test for the Lumen HTTP API.
+#
+# Starts a real server and checks CRUD, search, error responses, and restart
+# recovery. Uses a 1s checkpoint interval so indexed documents are searchable
+# quickly.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -63,8 +64,6 @@ req() {
   echo
 }
 
-# Poll a search until it returns at least one hit (writes are searchable only
-# after the next checkpoint), then print the response. Fails on timeout.
 wait_searchable() {
   local path="$1"
   for _ in $(seq 1 50); do
