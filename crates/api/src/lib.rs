@@ -3,8 +3,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod error;
+mod handlers;
+
 use anyhow::Context;
-use axum::routing::get;
+use axum::routing::{get, post, put};
 use axum::{http::StatusCode, Router};
 use clap::Parser;
 use lumen_core::Catalog;
@@ -26,7 +29,7 @@ pub struct Config {
     pub bind: SocketAddr,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AppState {
     pub catalog: Arc<Catalog>,
 }
@@ -34,6 +37,27 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(|| async { StatusCode::OK }))
+        .route("/collections", get(handlers::list_collections))
+        .route(
+            "/collections/{name}",
+            put(handlers::create_collection)
+                .get(handlers::describe_collection)
+                .delete(handlers::drop_collection),
+        )
+        .route(
+            "/collections/{name}/documents",
+            post(handlers::index_document),
+        )
+        .route(
+            "/collections/{name}/documents/search",
+            get(handlers::search_documents),
+        )
+        .route(
+            "/collections/{name}/documents/{id}",
+            put(handlers::put_document)
+                .get(handlers::get_document)
+                .delete(handlers::delete_document),
+        )
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
@@ -105,7 +129,10 @@ async fn shutdown_signal() {
             Ok(mut term) => {
                 term.recv().await;
             }
-            Err(e) => tracing::error!(error = %e, "install SIGTERM handler"),
+            Err(e) => {
+                tracing::error!(error = %e, "install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
         }
     };
 

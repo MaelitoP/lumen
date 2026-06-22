@@ -1,6 +1,6 @@
 use tantivy::collector::{Count, TopDocs};
-use tantivy::query::QueryParser;
-use tantivy::schema::{Field, Schema, Value};
+use tantivy::query::{QueryParser, TermQuery};
+use tantivy::schema::{Field, IndexRecordOption, Schema, Term, Value};
 use tantivy::{Index, IndexReader, TantivyDocument};
 
 use crate::error::{Error, Result};
@@ -57,6 +57,32 @@ pub(crate) fn execute(
         });
     }
     Ok(SearchResults { hits, total })
+}
+
+pub(crate) fn source_by_id(
+    index: &Index,
+    reader: &IndexReader,
+    id: &str,
+) -> Result<Option<Vec<u8>>> {
+    let schema = index.schema();
+    let id_field = schema.get_field(ID_FIELD).expect("schema always has _id");
+    let source_field = schema
+        .get_field(SOURCE_FIELD)
+        .expect("schema always has _source");
+
+    let query = TermQuery::new(
+        Term::from_field_text(id_field, id),
+        IndexRecordOption::Basic,
+    );
+    let searcher = reader.searcher();
+    let top = searcher.search(&query, &TopDocs::with_limit(1))?;
+    match top.first() {
+        Some(&(_, address)) => {
+            let doc: TantivyDocument = searcher.doc(address)?;
+            Ok(Some(bytes_field(&doc, source_field, SOURCE_FIELD)))
+        }
+        None => Ok(None),
+    }
 }
 
 fn default_fields(schema: &Schema) -> Vec<Field> {

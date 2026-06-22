@@ -282,6 +282,12 @@ impl Catalog {
         Ok(Upserted { id, created })
     }
 
+    pub fn get_document(&self, collection: &str, id: &str) -> Result<Vec<u8>> {
+        self.get(collection)?
+            .source(id)?
+            .ok_or_else(|| Error::DocumentNotFound(id.to_owned()))
+    }
+
     pub fn delete_document(&self, collection: &str, id: &str) -> Result<bool> {
         let target = self.get(collection)?;
         let mut wal = self.wal.lock().expect("write lock poisoned");

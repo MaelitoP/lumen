@@ -700,6 +700,8 @@ dependencies = [
  "axum",
  "clap",
  "lumen-core",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tower",

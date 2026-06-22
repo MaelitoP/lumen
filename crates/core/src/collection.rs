@@ -114,6 +114,10 @@ impl Collection {
         search::execute(&self.index, &self.reader, query, limit, offset)
     }
 
+    pub fn source(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        search::source_by_id(&self.index, &self.reader, id)
+    }
+
     fn id_term(&self, id: &str) -> Term {
         let id_field = self
             .index
