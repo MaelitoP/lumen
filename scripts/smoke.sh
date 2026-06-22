@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Smoke test for the Lumen HTTP API.
 #
-# Starts a real server and checks CRUD, search, error responses, and restart
-# recovery. Uses a 1s checkpoint interval so indexed documents are searchable
-# quickly.
+# Starts a real server, runs a few CRUD/search requests, kills it, and checks
+# that data is still there after restart. The short checkpoint interval keeps
+# the test fast.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -30,14 +30,22 @@ start_server() {
   "${BIN}" --data-dir "${DATA}" --bind "${ADDR}" --checkpoint-interval-secs 1 \
     >>"${LOG}" 2>&1 &
   SERVER_PID=$!
+
   for _ in $(seq 1 100); do
-    if curl -fsS "${BASE}/health" >/dev/null 2>&1; then return 0; fi
+    if curl -fsS "${BASE}/health" >/dev/null 2>&1; then
+      return 0
+    fi
     if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
-      echo "server exited during startup; log:" >&2; cat "${LOG}" >&2; exit 1
+      echo "server exited during startup; log:" >&2
+      cat "${LOG}" >&2
+      exit 1
     fi
     sleep 0.1
   done
-  echo "server did not become ready" >&2; cat "${LOG}" >&2; exit 1
+
+  echo "server did not become ready" >&2
+  cat "${LOG}" >&2
+  exit 1
 }
 
 crash_server() {
@@ -54,6 +62,7 @@ stop_server_graceful() {
 
 req() {
   local method="$1" path="$2" body="${3:-}"
+
   echo "+ ${method} ${path}${body:+  ${body}}"
   if [[ -n "${body}" ]]; then
     curl -sS -X "${method}" "${BASE}${path}" -H 'content-type: application/json' \
@@ -66,13 +75,17 @@ req() {
 
 wait_searchable() {
   local path="$1"
+
   for _ in $(seq 1 50); do
     if curl -fsS "${BASE}${path}" | grep -q '"total":[1-9]'; then
-      req GET "${path}"; return 0
+      req GET "${path}"
+      return 0
     fi
     sleep 0.1
   done
-  echo "documents never became searchable at ${path}" >&2; exit 1
+
+  echo "documents never became searchable at ${path}" >&2
+  exit 1
 }
 
 echo "== build =="
@@ -94,14 +107,14 @@ echo "== index documents =="
 req POST /collections/books/documents '{"title":"The Rust Programming Language","year":2018}'
 req PUT  /collections/books/documents/tdg '{"title":"Designing Data-Intensive Applications","year":2017}'
 
-echo "== search (available after the next checkpoint) =="
+echo "== search =="
 wait_searchable '/collections/books/documents/search?q=rust'
 req GET  /collections/books/documents/tdg
 
-echo "== crash (kill -9) and restart: durability without a clean shutdown =="
+echo "== crash and restart =="
 crash_server
 start_server
-echo "-- data survived the crash:"
+echo "-- checking recovered data"
 wait_searchable '/collections/books/documents/search?q=data'
 
 echo "== delete + idempotent re-create + error paths =="
@@ -111,4 +124,3 @@ req PUT    /collections/books '{"fields":{"title":{"type":"keyword","indexed":tr
 req GET    /collections/nope
 
 stop_server_graceful
-echo "== smoke complete =="

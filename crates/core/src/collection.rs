@@ -21,14 +21,26 @@ const WRITER_HEAP_BYTES: usize = 15_000_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Upserted {
     pub id: String,
-    /// Best-effort: reflects the last committed reader, so a re-upsert of the same
-    /// `_id` before a checkpoint may report `true` again.
+    /// Best-effort.
+    ///
+    /// `created` is checked against the last committed reader. If the same `_id`
+    /// is upserted again before the next commit, this can return `true` again.
     pub created: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Checkpoint {
-    high_water: u64,
+/// Log position a collection has committed.
+///
+/// The value is stored in the Tantivy commit payload. It keeps the full Raft
+/// `LogId` fields: `term`, `node`, and `index`. `term` and `node` are needed
+/// because openraft compares committed entries by leader id, not only by index.
+///
+/// The single-node write path is not driven by Raft, so it stores `0` for
+/// `term` and `node`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LogMark {
+    pub term: u64,
+    pub node: u64,
+    pub index: u64,
 }
 
 pub struct Collection {
@@ -89,11 +101,10 @@ impl Collection {
         Ok(existed)
     }
 
-    pub(crate) fn commit(&self, high_water: u64) -> Result<()> {
+    pub(crate) fn commit(&self, mark: LogMark) -> Result<()> {
         let mut writer = self.writer.lock().expect("writer poisoned");
         let mut prepared = writer.prepare_commit()?;
-        let payload =
-            serde_json::to_string(&Checkpoint { high_water }).expect("checkpoint serializes");
+        let payload = serde_json::to_string(&mark).expect("log mark serializes");
         prepared.set_payload(&payload);
         prepared.commit()?;
         drop(writer);
@@ -101,12 +112,13 @@ impl Collection {
         Ok(())
     }
 
-    pub(crate) fn committed_high_water(&self) -> Result<u64> {
+    pub(crate) fn committed_mark(&self) -> Result<Option<LogMark>> {
         match self.index.load_metas()?.payload {
-            Some(payload) => Ok(serde_json::from_str::<Checkpoint>(&payload)
-                .map_err(|e| Error::Recovery(format!("invalid commit payload: {e}")))?
-                .high_water),
-            None => Ok(0),
+            Some(payload) => Ok(Some(
+                serde_json::from_str::<LogMark>(&payload)
+                    .map_err(|e| Error::Recovery(format!("invalid commit payload: {e}")))?,
+            )),
+            None => Ok(None),
         }
     }
 

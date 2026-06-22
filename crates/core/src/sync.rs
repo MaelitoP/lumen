@@ -5,9 +5,11 @@ use std::io;
 pub(crate) fn fsync(file: &File) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
 
-    // Plain fsync on macOS reaches only the drive cache; F_FULLFSYNC (which subsumes
-    // fsync) is the power-loss barrier.
-    // SAFETY: the fd is valid for the borrow of `file`; F_FULLFSYNC takes no argument.
+    // On macOS, `fsync` may stop at the drive cache. `F_FULLFSYNC` asks the
+    // drive to flush data to stable storage.
+    //
+    // SAFETY: `file.as_raw_fd()` is valid while `file` is borrowed, and
+    // `F_FULLFSYNC` does not take an extra argument.
     let ret = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) };
     if ret == -1 {
         return Err(io::Error::last_os_error());

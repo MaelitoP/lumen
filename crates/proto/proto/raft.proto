@@ -96,6 +96,12 @@ message SnapshotResponse {
   Vote vote = 1;
 }
 
+message RaftMeta {
+  Vote vote = 1;
+  LogId committed = 2;
+  LogId last_purged = 3;
+}
+
 service RaftService {
   rpc Vote(VoteRequest) returns (VoteResponse);
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);

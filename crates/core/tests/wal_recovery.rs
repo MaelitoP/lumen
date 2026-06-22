@@ -28,14 +28,16 @@ fn document_survives_crash_before_commit() {
             .upsert_document("books", Some("b1"), source)
             .unwrap();
 
-        // WAL-appended (fsync'd) but not committed: durable, not yet searchable.
+        // The document is in the WAL but not in a Tantivy commit yet.
+        // It is durable, but not searchable until recovery replays it.
         let pending = catalog
             .get("books")
             .unwrap()
             .search("durable", 10, 0)
             .unwrap();
         assert_eq!(pending.total, 0);
-        // Dropping without a checkpoint is the process kill after the WAL append.
+
+        // Dropping the catalog here simulates a process crash before checkpoint.
     }
 
     let catalog = Catalog::open(dir.path()).unwrap();
@@ -79,7 +81,8 @@ fn recovers_committed_and_uncommitted_documents() {
         catalog
             .upsert_document("books", Some("pending"), br#"{"title":"shared beta"}"#)
             .unwrap();
-        // "committed" is in the Tantivy commit; "pending" is only WAL-durable.
+
+        // `committed` is already in Tantivy. `pending` is only in the WAL.
     }
 
     let catalog = Catalog::open(dir.path()).unwrap();
@@ -97,7 +100,8 @@ fn collection_created_before_crash_recovers() {
     {
         let catalog = Catalog::open(dir.path()).unwrap();
         catalog.create("books", mapping()).unwrap();
-        // no checkpoint: the create lives only in the WAL.
+
+        // No checkpoint: the collection create exists only in the WAL.
     }
 
     let catalog = Catalog::open(dir.path()).unwrap();
@@ -112,7 +116,8 @@ fn drop_collection_before_crash_recovers() {
         catalog.create("books", mapping()).unwrap();
         catalog.checkpoint().unwrap();
         catalog.drop_collection("books").unwrap();
-        // the drop is WAL-durable but not checkpointed.
+
+        // The drop is in the WAL but not in a catalog snapshot yet.
     }
 
     let catalog = Catalog::open(dir.path()).unwrap();
@@ -129,7 +134,9 @@ fn index_for_dropped_collection_is_skipped() {
             .upsert_document("books", Some("b1"), br#"{"title":"x"}"#)
             .unwrap();
         catalog.drop_collection("books").unwrap();
-        // create + index + drop all live only in the WAL; replay must skip the index.
+
+        // Create, index, and drop are all only in the WAL. Replay must not bring
+        // the dropped collection back just because it contains an index command.
     }
 
     let catalog = Catalog::open(dir.path()).unwrap();
@@ -147,7 +154,8 @@ fn delete_before_crash_is_replayed() {
             .unwrap();
         catalog.checkpoint().unwrap();
         catalog.delete_document("books", "b1").unwrap();
-        // delete is WAL-durable but not committed.
+
+        // The delete is in the WAL but not in a Tantivy commit yet.
     }
 
     let catalog = Catalog::open(dir.path()).unwrap();

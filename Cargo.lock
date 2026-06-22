@@ -1008,8 +1008,11 @@ version = "0.1.0"
 name = "lumen-cluster"
 version = "0.1.0"
 dependencies = [
+ "lumen-core",
  "lumen-proto",
  "openraft",
+ "prost",
+ "tempfile",
  "tokio",
 ]
 

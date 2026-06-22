@@ -1,3 +1,3 @@
 fn main() {
-    println!("lumen cli – work in progress");
+    println!("lumen cli");
 }

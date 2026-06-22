@@ -5,7 +5,7 @@ use lumen_proto::v1::Command;
 
 pub type NodeId = u64;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Response {
     pub id: String,
     pub created: bool,

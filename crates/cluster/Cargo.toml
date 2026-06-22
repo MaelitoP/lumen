@@ -5,8 +5,11 @@ edition = "2021"
 rust-version.workspace = true
 
 [dependencies]
+lumen-core = { path = "../core" }
 lumen-proto = { path = "../proto", features = ["grpc"] }
 openraft = { version = "0.9.24", features = ["storage-v2"] }
+prost = "0.14"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

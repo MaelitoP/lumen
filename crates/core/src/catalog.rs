@@ -10,7 +10,7 @@ use prost::Message;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::collection::{Collection, Upserted};
+use crate::collection::{Collection, LogMark, Upserted};
 use crate::error::{Error, Result};
 use crate::mapping::Mapping;
 use crate::sync::fsync;
@@ -28,12 +28,6 @@ struct Entry {
     collection: Arc<Collection>,
 }
 
-struct CollectionMeta {
-    uuid: Uuid,
-    mapping: Mapping,
-    created_seq: u64,
-}
-
 #[derive(Debug)]
 pub struct Catalog {
     root: PathBuf,
@@ -48,6 +42,16 @@ pub struct Created {
     pub created: bool,
 }
 
+/// Result of applying one `Command`.
+///
+/// `id` is set for document writes and deletes. `created` is best-effort, same
+/// as [`Upserted::created`].
+#[derive(Debug, Default, Clone)]
+pub struct ApplyOutcome {
+    pub id: String,
+    pub created: bool,
+}
+
 impl Catalog {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
@@ -56,140 +60,52 @@ impl Catalog {
         let snapshot = load_snapshot(&root)?;
         let applied_seq = snapshot.applied_seq;
 
-        let mut metas: HashMap<String, CollectionMeta> = HashMap::new();
+        let (wal, entries) = Wal::open(&root)?;
+
+        // If a collection from the snapshot was dropped in the WAL tail, do not
+        // reopen it.
+        //
+        // The drop is newer than the snapshot and its directory has already been
+        // removed.
+        let dropped_in_tail: HashSet<&str> = entries
+            .iter()
+            .filter(|e| e.seq > applied_seq)
+            .filter_map(|e| match e.command.as_ref()?.op.as_ref()? {
+                proto::command::Op::DropCollection(drop) => Some(drop.collection.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        let mut collections = HashMap::with_capacity(snapshot.entries.len());
+        let mut max_seq = applied_seq;
+        for entry in &entries {
+            max_seq = max_seq.max(entry.seq);
+        }
         for entry in snapshot.entries {
+            if dropped_in_tail.contains(entry.name.as_str()) {
+                continue;
+            }
             let uuid = Uuid::parse_str(&entry.uuid).map_err(|_| {
                 Error::Recovery(format!("invalid uuid {:?} in snapshot", entry.uuid))
             })?;
             let proto_mapping = entry
                 .mapping
                 .ok_or_else(|| Error::Recovery(format!("catalog entry {uuid} has no mapping")))?;
-            metas.insert(
-                entry.name,
-                CollectionMeta {
-                    uuid,
-                    mapping: Mapping::try_from(proto_mapping)?,
-                    created_seq: entry.created_seq,
-                },
-            );
-        }
-
-        let (wal, entries) = Wal::open(&root)?;
-        let mut max_seq = applied_seq;
-        let mut replayed = false;
-
-        for entry in &entries {
-            max_seq = max_seq.max(entry.seq);
-            if entry.seq <= applied_seq {
-                continue;
-            }
-            match command_op(entry) {
-                Some(proto::command::Op::CreateCollection(create)) => {
-                    let proto_mapping = create
-                        .mapping
-                        .clone()
-                        .ok_or_else(|| Error::Recovery("wal create has no mapping".into()))?;
-                    let mapping = Mapping::try_from(proto_mapping)?;
-                    match metas.get(&create.collection) {
-                        Some(existing) if existing.mapping == mapping => {}
-                        Some(_) => {
-                            return Err(Error::SchemaConflict {
-                                name: create.collection.clone(),
-                            })
-                        }
-                        None => {
-                            let uuid = Uuid::parse_str(&create.uuid).map_err(|_| {
-                                Error::Recovery(format!(
-                                    "wal create has invalid uuid {:?}",
-                                    create.uuid
-                                ))
-                            })?;
-                            metas.insert(
-                                create.collection.clone(),
-                                CollectionMeta {
-                                    uuid,
-                                    mapping,
-                                    created_seq: entry.seq,
-                                },
-                            );
-                            replayed = true;
-                        }
-                    }
-                }
-                Some(proto::command::Op::DropCollection(drop)) => {
-                    if let Some(meta) = metas.remove(&drop.collection) {
-                        let dir = root.join(meta.uuid.to_string());
-                        if dir.exists() {
-                            fs::remove_dir_all(dir)?;
-                        }
-                        replayed = true;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let mut collections = HashMap::with_capacity(metas.len());
-        let mut skips: HashMap<String, u64> = HashMap::new();
-        for (name, meta) in metas {
-            let dir = root.join(meta.uuid.to_string());
-            let collection = if dir.exists() {
-                Collection::open(&root, meta.uuid, meta.mapping)?
-            } else if meta.created_seq > applied_seq {
-                Collection::create(&root, meta.uuid, meta.mapping)?
-            } else {
+            let mapping = Mapping::try_from(proto_mapping)?;
+            if !root.join(uuid.to_string()).exists() {
                 return Err(Error::Recovery(format!(
-                    "catalog entry {} has no data dir",
-                    meta.uuid
+                    "catalog entry {uuid} has no data dir"
                 )));
-            };
-            let skip = collection.committed_high_water()?.max(meta.created_seq);
-            max_seq = max_seq.max(meta.created_seq);
-            skips.insert(name.clone(), skip);
+            }
+            max_seq = max_seq.max(entry.created_seq);
             collections.insert(
-                name,
+                entry.name,
                 Entry {
-                    uuid: meta.uuid,
-                    created_seq: meta.created_seq,
-                    collection: Arc::new(collection),
+                    uuid,
+                    created_seq: entry.created_seq,
+                    collection: Arc::new(Collection::open(&root, uuid, mapping)?),
                 },
             );
-        }
-
-        for entry in &entries {
-            let seq = entry.seq;
-            match command_op(entry) {
-                Some(proto::command::Op::IndexDocument(index))
-                    if skips.get(&index.collection).is_some_and(|skip| seq > *skip) =>
-                {
-                    let parsed: Value = serde_json::from_slice(&index.source)
-                        .map_err(|e| Error::Recovery(format!("wal index has invalid json: {e}")))?;
-                    collections[&index.collection].collection.apply_upsert(
-                        &index.id,
-                        &index.source,
-                        &parsed,
-                    )?;
-                    replayed = true;
-                }
-                Some(proto::command::Op::DeleteDocument(delete))
-                    if skips
-                        .get(&delete.collection)
-                        .is_some_and(|skip| seq > *skip) =>
-                {
-                    collections[&delete.collection]
-                        .collection
-                        .apply_delete(&delete.id)?;
-                    replayed = true;
-                }
-                _ => {}
-            }
-        }
-
-        let live: HashSet<Uuid> = collections.values().map(|entry| entry.uuid).collect();
-        for uuid in collection_dirs(&root)? {
-            if !live.contains(&uuid) {
-                quarantine(&root, uuid, max_seq)?;
-            }
         }
 
         let catalog = Self {
@@ -198,6 +114,33 @@ impl Catalog {
             wal: Mutex::new(wal),
             collections: Mutex::new(collections),
         };
+
+        let mut replayed = false;
+        for entry in &entries {
+            if entry.seq <= applied_seq {
+                continue;
+            }
+            if let Some(command) = &entry.command {
+                catalog.apply_command(
+                    LogMark {
+                        term: 0,
+                        node: 0,
+                        index: entry.seq,
+                    },
+                    command,
+                )?;
+                replayed = true;
+            }
+        }
+
+        let live: HashSet<Uuid> = catalog.collections().values().map(|e| e.uuid).collect();
+        let high = catalog.seq.load(Ordering::Relaxed);
+        for uuid in collection_dirs(&catalog.root)? {
+            if !live.contains(&uuid) {
+                quarantine(&catalog.root, uuid, high)?;
+            }
+        }
+
         if replayed {
             catalog.checkpoint()?;
         }
@@ -234,15 +177,7 @@ impl Catalog {
                 mapping: Some(mapping.clone().into()),
             }),
         ))?;
-        let collection = Arc::new(Collection::create(&self.root, uuid, mapping)?);
-        self.collections().insert(
-            name.to_owned(),
-            Entry {
-                uuid,
-                created_seq: seq,
-                collection: Arc::clone(&collection),
-            },
-        );
+        let collection = self.install_collection(name, uuid, mapping, seq)?;
         Ok(Created {
             collection,
             created: true,
@@ -265,9 +200,7 @@ impl Catalog {
             }),
         ))?;
         self.collections().remove(name);
-        fs::remove_dir_all(self.root.join(uuid.to_string()))?;
-        fsync_dir(&self.root)?;
-        Ok(())
+        self.drop_dir(uuid)
     }
 
     pub fn upsert_document(
@@ -316,17 +249,102 @@ impl Catalog {
         target.apply_delete(id)
     }
 
-    pub fn checkpoint(&self) -> Result<()> {
-        let wal = self.wal.lock().expect("write lock poisoned");
-        let high_water = self.seq.load(Ordering::Relaxed);
-        {
-            let map = self.collections();
-            for entry in map.values() {
-                entry.collection.commit(high_water)?;
+    /// Applies a committed `Command` without writing it to the WAL.
+    ///
+    /// The caller owns log ordering and durability. Already-applied document
+    /// commands are skipped, so replay is safe. Business validation happens
+    /// before the leader accepts the command.
+    pub fn apply_command(&self, mark: LogMark, command: &proto::Command) -> Result<ApplyOutcome> {
+        match command.op.as_ref() {
+            Some(proto::command::Op::CreateCollection(create)) => {
+                self.apply_create(mark, create)?;
+                Ok(ApplyOutcome::default())
             }
+            Some(proto::command::Op::DropCollection(drop)) => {
+                self.apply_drop(mark, &drop.collection)?;
+                Ok(ApplyOutcome::default())
+            }
+            Some(proto::command::Op::IndexDocument(index)) => self.apply_index(mark, index),
+            Some(proto::command::Op::DeleteDocument(delete)) => self.apply_delete_doc(mark, delete),
+            None => Ok(ApplyOutcome::default()),
         }
-        self.persist(high_water)?;
-        // safe at the head: checkpoint just advanced every consumer to `high_water`.
+    }
+
+    /// Returns the lowest committed mark across all collections.
+    ///
+    /// This is the log point that is safe to report as applied. `None` means the
+    /// catalog has no collections.
+    pub fn min_committed_mark(&self) -> Result<Option<LogMark>> {
+        let map = self.collections();
+        let mut min: Option<LogMark> = None;
+        for entry in map.values() {
+            let mark = entry.collection.committed_mark()?.unwrap_or_default();
+            min = Some(match min {
+                Some(current) if current.index <= mark.index => current,
+                _ => mark,
+            });
+        }
+        Ok(min)
+    }
+
+    /// Commits every collection at `mark` and writes a new catalog snapshot.
+    ///
+    /// Unlike [`Self::checkpoint`], this does not trim the WAL because the caller
+    /// owns the log.
+    pub fn checkpoint_applied(&self, mark: LogMark) -> Result<()> {
+        self.commit_all(mark)
+    }
+
+    pub fn export_state(&self) -> Result<Vec<u8>> {
+        Ok(self
+            .snapshot_proto(self.seq.load(Ordering::Relaxed))
+            .encode_to_vec())
+    }
+
+    /// Replaces the catalog from a serialized snapshot.
+    ///
+    /// The snapshot contains collection names, UUIDs, and mappings. It does not
+    /// contain Tantivy index data, so collection directories must already exist
+    /// for non-empty imports.
+    pub fn import_state(&self, bytes: &[u8]) -> Result<()> {
+        let snapshot = proto::CatalogSnapshot::decode(bytes)
+            .map_err(|e| Error::Recovery(format!("corrupt catalog snapshot on import: {e}")))?;
+        let mut rebuilt = HashMap::with_capacity(snapshot.entries.len());
+        for entry in snapshot.entries {
+            let uuid = Uuid::parse_str(&entry.uuid)
+                .map_err(|_| Error::Recovery(format!("invalid uuid {:?} on import", entry.uuid)))?;
+            let mapping =
+                Mapping::try_from(entry.mapping.ok_or_else(|| {
+                    Error::Recovery(format!("import entry {uuid} has no mapping"))
+                })?)?;
+            let dir = self.root.join(uuid.to_string());
+            let collection = if dir.exists() {
+                Collection::open(&self.root, uuid, mapping)?
+            } else {
+                Collection::create(&self.root, uuid, mapping)?
+            };
+            rebuilt.insert(
+                entry.name,
+                Entry {
+                    uuid,
+                    created_seq: entry.created_seq,
+                    collection: Arc::new(collection),
+                },
+            );
+        }
+        *self.collections() = rebuilt;
+        self.persist(snapshot.applied_seq)
+    }
+
+    pub fn checkpoint(&self) -> Result<()> {
+        let mut wal = self.wal.lock().expect("write lock poisoned");
+        let high_water = self.seq.load(Ordering::Relaxed);
+        self.commit_all(LogMark {
+            term: 0,
+            node: 0,
+            index: high_water,
+        })?;
+        // Safe because `commit_all` just advanced every collection to `high_water`.
         wal.trim(high_water)?;
         Ok(())
     }
@@ -348,6 +366,127 @@ impl Catalog {
         names
     }
 
+    fn apply_create(&self, mark: LogMark, create: &proto::CreateCollection) -> Result<()> {
+        let mapping = Mapping::try_from(
+            create
+                .mapping
+                .clone()
+                .ok_or_else(|| Error::Recovery("create command has no mapping".into()))?,
+        )?;
+        {
+            let map = self.collections();
+            match map.get(&create.collection) {
+                Some(existing) if existing.collection.mapping() == &mapping => return Ok(()),
+                Some(_) => {
+                    return Err(Error::SchemaConflict {
+                        name: create.collection.clone(),
+                    })
+                }
+                None => {}
+            }
+        }
+        let uuid = Uuid::parse_str(&create.uuid).map_err(|_| {
+            Error::Recovery(format!("create command has invalid uuid {:?}", create.uuid))
+        })?;
+        self.install_collection(&create.collection, uuid, mapping, mark.index)?;
+        self.persist(mark.index)
+    }
+
+    fn apply_drop(&self, mark: LogMark, name: &str) -> Result<()> {
+        let uuid = self.collections().remove(name).map(|entry| entry.uuid);
+        if let Some(uuid) = uuid {
+            self.drop_dir(uuid)?;
+            self.persist(mark.index)?;
+        }
+        Ok(())
+    }
+
+    fn apply_index(&self, mark: LogMark, index: &proto::IndexDocument) -> Result<ApplyOutcome> {
+        let Some(target) = self.lookup(&index.collection) else {
+            return Ok(ApplyOutcome::default());
+        };
+        if mark.index <= target.committed_mark()?.unwrap_or_default().index {
+            return Ok(ApplyOutcome {
+                id: index.id.clone(),
+                created: false,
+            });
+        }
+        let parsed: Value = serde_json::from_slice(&index.source)
+            .map_err(|e| Error::Recovery(format!("index command has invalid json: {e}")))?;
+        let created = target.apply_upsert(&index.id, &index.source, &parsed)?;
+        Ok(ApplyOutcome {
+            id: index.id.clone(),
+            created,
+        })
+    }
+
+    fn apply_delete_doc(
+        &self,
+        mark: LogMark,
+        delete: &proto::DeleteDocument,
+    ) -> Result<ApplyOutcome> {
+        let Some(target) = self.lookup(&delete.collection) else {
+            return Ok(ApplyOutcome::default());
+        };
+        if mark.index <= target.committed_mark()?.unwrap_or_default().index {
+            return Ok(ApplyOutcome::default());
+        }
+        target.apply_delete(&delete.id)?;
+        Ok(ApplyOutcome {
+            id: delete.id.clone(),
+            created: false,
+        })
+    }
+
+    fn install_collection(
+        &self,
+        name: &str,
+        uuid: Uuid,
+        mapping: Mapping,
+        created_seq: u64,
+    ) -> Result<Arc<Collection>> {
+        let collection = if self.root.join(uuid.to_string()).exists() {
+            Collection::open(&self.root, uuid, mapping)?
+        } else {
+            Collection::create(&self.root, uuid, mapping)?
+        };
+        let collection = Arc::new(collection);
+        self.collections().insert(
+            name.to_owned(),
+            Entry {
+                uuid,
+                created_seq,
+                collection: Arc::clone(&collection),
+            },
+        );
+        Ok(collection)
+    }
+
+    fn drop_dir(&self, uuid: Uuid) -> Result<()> {
+        let dir = self.root.join(uuid.to_string());
+        if dir.exists() {
+            fs::remove_dir_all(dir)?;
+            fsync_dir(&self.root)?;
+        }
+        Ok(())
+    }
+
+    fn commit_all(&self, mark: LogMark) -> Result<()> {
+        {
+            let map = self.collections();
+            for entry in map.values() {
+                entry.collection.commit(mark)?;
+            }
+        }
+        self.persist(mark.index)
+    }
+
+    fn lookup(&self, name: &str) -> Option<Arc<Collection>> {
+        self.collections()
+            .get(name)
+            .map(|entry| Arc::clone(&entry.collection))
+    }
+
     fn collections(&self) -> MutexGuard<'_, HashMap<String, Entry>> {
         self.collections.lock().expect("catalog poisoned")
     }
@@ -357,22 +496,23 @@ impl Catalog {
     }
 
     fn persist(&self, applied_seq: u64) -> Result<()> {
-        let snapshot = {
-            let map = self.collections();
-            proto::CatalogSnapshot {
-                applied_seq,
-                entries: map
-                    .iter()
-                    .map(|(name, entry)| proto::CatalogEntry {
-                        name: name.clone(),
-                        uuid: entry.uuid.to_string(),
-                        mapping: Some(entry.collection.mapping().clone().into()),
-                        created_seq: entry.created_seq,
-                    })
-                    .collect(),
-            }
-        };
-        write_snapshot(&self.root, &snapshot)
+        write_snapshot(&self.root, &self.snapshot_proto(applied_seq))
+    }
+
+    fn snapshot_proto(&self, applied_seq: u64) -> proto::CatalogSnapshot {
+        let map = self.collections();
+        proto::CatalogSnapshot {
+            applied_seq,
+            entries: map
+                .iter()
+                .map(|(name, entry)| proto::CatalogEntry {
+                    name: name.clone(),
+                    uuid: entry.uuid.to_string(),
+                    mapping: Some(entry.collection.mapping().clone().into()),
+                    created_seq: entry.created_seq,
+                })
+                .collect(),
+        }
     }
 }
 
@@ -381,10 +521,6 @@ fn wal_entry(seq: u64, op: proto::command::Op) -> proto::WalEntry {
         seq,
         command: Some(proto::Command { op: Some(op) }),
     }
-}
-
-fn command_op(entry: &proto::WalEntry) -> Option<&proto::command::Op> {
-    entry.command.as_ref().and_then(|c| c.op.as_ref())
 }
 
 fn validate_name(name: &str) -> Result<()> {
