@@ -17,7 +17,6 @@ use tokio::time::MissedTickBehavior;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
-const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Parser)]
@@ -27,6 +26,8 @@ pub struct Config {
     pub data_dir: PathBuf,
     #[arg(long, env = "LUMEN_BIND", default_value = "127.0.0.1:7700")]
     pub bind: SocketAddr,
+    #[arg(long, env = "LUMEN_CHECKPOINT_INTERVAL_SECS", default_value_t = 30)]
+    pub checkpoint_interval_secs: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -76,7 +77,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     };
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let checkpoint = tokio::spawn(checkpoint_loop(Arc::clone(&catalog), shutdown_rx));
+    let interval = Duration::from_secs(config.checkpoint_interval_secs);
+    let checkpoint = tokio::spawn(checkpoint_loop(Arc::clone(&catalog), interval, shutdown_rx));
 
     let listener = TcpListener::bind(config.bind)
         .await
@@ -93,8 +95,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn checkpoint_loop(catalog: Arc<Catalog>, mut shutdown: watch::Receiver<bool>) {
-    let mut tick = tokio::time::interval(CHECKPOINT_INTERVAL);
+async fn checkpoint_loop(
+    catalog: Arc<Catalog>,
+    interval: Duration,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut tick = tokio::time::interval(interval);
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     tick.tick().await;
     loop {

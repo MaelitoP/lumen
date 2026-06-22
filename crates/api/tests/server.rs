@@ -51,10 +51,13 @@ fn flags_override_defaults() {
         "/tmp/lumen-test",
         "--bind",
         "0.0.0.0:9999",
+        "--checkpoint-interval-secs",
+        "1",
     ])
     .expect("parse");
     assert_eq!(config.data_dir.to_str(), Some("/tmp/lumen-test"));
     assert_eq!(config.bind.to_string(), "0.0.0.0:9999");
+    assert_eq!(config.checkpoint_interval_secs, 1);
 }
 
 #[test]
@@ -62,6 +65,7 @@ fn defaults_apply_without_args() {
     let config = Config::try_parse_from(["lumen"]).expect("parse");
     assert_eq!(config.data_dir.to_str(), Some("data"));
     assert_eq!(config.bind.to_string(), "127.0.0.1:7700");
+    assert_eq!(config.checkpoint_interval_secs, 30);
 }
 
 #[tokio::test]
