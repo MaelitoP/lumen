@@ -1,3 +1,3 @@
-//! # Lumen Cluster
-//!
-//! Intended home for cluster metadata and node coordination.
+mod type_config;
+
+pub use type_config::{LumenRaft, Node, NodeId, Response, TypeConfig};

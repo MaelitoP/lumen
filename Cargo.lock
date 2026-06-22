@@ -1007,6 +1007,11 @@ version = "0.1.0"
 [[package]]
 name = "lumen-cluster"
 version = "0.1.0"
+dependencies = [
+ "lumen-proto",
+ "openraft",
+ "tokio",
+]
 
 [[package]]
 name = "lumen-core"
