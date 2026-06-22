@@ -17,10 +17,6 @@ fmt:
 clippy:
     @cargo clippy --all-targets --all-features -- -D warnings
 
-bench target="lumen-bench" count="100000":
-    @docker compose up -d
-    @docker compose exec {{docker_service}} cargo run -p {{target}} --release -- --generate {{count}}
-
 docker_dev:
     @docker compose run --rm {{docker_service}} bash
 
