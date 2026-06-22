@@ -25,6 +25,7 @@ fn catalog_with_books(dir: &Path) -> Catalog {
 }
 
 fn search(catalog: &Catalog, query: &str, limit: usize, offset: usize) -> SearchResults {
+    catalog.checkpoint().unwrap();
     catalog
         .get("books")
         .unwrap()
@@ -69,19 +70,44 @@ fn reindexing_replaces_document() {
     let dir = tempdir().unwrap();
     let catalog = catalog_with_books(dir.path());
 
-    assert!(
-        catalog
-            .upsert_document("books", Some("b1"), br#"{"title":"first"}"#)
-            .unwrap()
-            .created
-    );
-    let out = catalog
+    catalog
+        .upsert_document("books", Some("b1"), br#"{"title":"first"}"#)
+        .unwrap();
+    catalog
         .upsert_document("books", Some("b1"), br#"{"title":"second"}"#)
         .unwrap();
-    assert!(!out.created);
 
     assert_eq!(search(&catalog, "second", 10, 0).total, 1);
     assert_eq!(search(&catalog, "first", 10, 0).total, 0);
+}
+
+#[test]
+fn created_flag_is_best_effort_until_checkpoint() {
+    let dir = tempdir().unwrap();
+    let catalog = catalog_with_books(dir.path());
+
+    assert!(
+        catalog
+            .upsert_document("books", Some("b1"), br#"{"title":"a"}"#)
+            .unwrap()
+            .created
+    );
+    // The committed reader has not seen the first (uncommitted) write, so a re-upsert
+    // before a checkpoint reports `created` again.
+    assert!(
+        catalog
+            .upsert_document("books", Some("b1"), br#"{"title":"b"}"#)
+            .unwrap()
+            .created
+    );
+
+    catalog.checkpoint().unwrap();
+    assert!(
+        !catalog
+            .upsert_document("books", Some("b1"), br#"{"title":"c"}"#)
+            .unwrap()
+            .created
+    );
 }
 
 #[test]
@@ -92,6 +118,7 @@ fn delete_removes_document() {
     catalog
         .upsert_document("books", Some("b1"), br#"{"title":"gone"}"#)
         .unwrap();
+    catalog.checkpoint().unwrap();
     assert!(catalog.delete_document("books", "b1").unwrap());
     assert_eq!(search(&catalog, "gone", 10, 0).total, 0);
     assert!(!catalog.delete_document("books", "b1").unwrap());
@@ -224,6 +251,7 @@ fn concurrent_writes_stay_consistent() {
         handle.join().unwrap();
     }
 
+    catalog.checkpoint().unwrap();
     let per_collection = (writers / 2) * per_writer;
     for collection in ["books", "movies"] {
         let hits = catalog

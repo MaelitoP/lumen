@@ -14,6 +14,7 @@ mod tests {
             command: Some(Command {
                 op: Some(command::Op::CreateCollection(CreateCollection {
                     collection: "books".to_string(),
+                    uuid: "1a2b".to_string(),
                     mapping: Some(Mapping {
                         fields: vec![Field {
                             name: "title".to_string(),

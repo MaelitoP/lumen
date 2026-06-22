@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tantivy::collector::Count;
 use tantivy::query::TermQuery;
@@ -20,7 +21,14 @@ const WRITER_HEAP_BYTES: usize = 15_000_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Upserted {
     pub id: String,
+    /// Best-effort: reflects the last committed reader, so a re-upsert of the same
+    /// `_id` before a checkpoint may report `true` again.
     pub created: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Checkpoint {
+    high_water: u64,
 }
 
 pub struct Collection {
@@ -64,31 +72,42 @@ impl Collection {
         &self.mapping
     }
 
-    pub(crate) fn upsert(&self, _seq: u64, id: Option<&str>, source: &[u8]) -> Result<Upserted> {
-        let parsed: Value = serde_json::from_slice(source)
-            .map_err(|e| Error::Validation(format!("invalid JSON: {e}")))?;
-        self.mapping.validate_document(&parsed)?;
-
-        let id = id.map_or_else(|| Uuid::new_v4().to_string(), str::to_owned);
+    pub(crate) fn apply_upsert(&self, id: &str, source: &[u8], parsed: &Value) -> Result<bool> {
         let schema = self.index.schema();
-        let doc = build_doc(&schema, &self.mapping, &id, source, &parsed)?;
-
-        let mut writer = self.writer.lock().expect("writer poisoned");
-        let created = !self.id_exists(&id)?;
-        writer.delete_term(self.id_term(&id));
+        let doc = build_doc(&schema, &self.mapping, id, source, parsed)?;
+        let created = !self.id_exists(id)?;
+        let writer = self.writer.lock().expect("writer poisoned");
+        writer.delete_term(self.id_term(id));
         writer.add_document(doc)?;
-        writer.commit()?;
-        self.reader.reload()?;
-        Ok(Upserted { id, created })
+        Ok(created)
     }
 
-    pub(crate) fn delete(&self, _seq: u64, id: &str) -> Result<bool> {
-        let mut writer = self.writer.lock().expect("writer poisoned");
+    pub(crate) fn apply_delete(&self, id: &str) -> Result<bool> {
         let existed = self.id_exists(id)?;
+        let writer = self.writer.lock().expect("writer poisoned");
         writer.delete_term(self.id_term(id));
-        writer.commit()?;
-        self.reader.reload()?;
         Ok(existed)
+    }
+
+    pub(crate) fn commit(&self, high_water: u64) -> Result<()> {
+        let mut writer = self.writer.lock().expect("writer poisoned");
+        let mut prepared = writer.prepare_commit()?;
+        let payload =
+            serde_json::to_string(&Checkpoint { high_water }).expect("checkpoint serializes");
+        prepared.set_payload(&payload);
+        prepared.commit()?;
+        drop(writer);
+        self.reader.reload()?;
+        Ok(())
+    }
+
+    pub(crate) fn committed_high_water(&self) -> Result<u64> {
+        match self.index.load_metas()?.payload {
+            Some(payload) => Ok(serde_json::from_str::<Checkpoint>(&payload)
+                .map_err(|e| Error::Recovery(format!("invalid commit payload: {e}")))?
+                .high_water),
+            None => Ok(0),
+        }
     }
 
     pub fn search(&self, query: &str, limit: usize, offset: usize) -> Result<SearchResults> {

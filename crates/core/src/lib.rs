@@ -4,6 +4,8 @@ mod document;
 mod error;
 mod mapping;
 mod search;
+mod sync;
+mod wal;
 
 pub use catalog::Catalog;
 pub use collection::{Collection, Upserted};

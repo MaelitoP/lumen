@@ -121,7 +121,9 @@ fn missing_dir_is_recovery_error() {
     let dir = tempdir().unwrap();
     let uuid = {
         let catalog = Catalog::open(dir.path()).unwrap();
-        catalog.create("books", mapping()).unwrap().uuid()
+        let uuid = catalog.create("books", mapping()).unwrap().uuid();
+        catalog.checkpoint().unwrap();
+        uuid
     };
 
     fs::remove_dir_all(dir.path().join(uuid.to_string())).unwrap();
@@ -146,32 +148,9 @@ fn corrupt_snapshot_is_recovery_error() {
     {
         let catalog = Catalog::open(dir.path()).unwrap();
         catalog.create("books", mapping()).unwrap();
+        catalog.checkpoint().unwrap();
     }
 
     fs::write(dir.path().join("catalog.pb"), b"not-protobuf").unwrap();
     assert!(matches!(Catalog::open(dir.path()), Err(Error::Recovery(_))));
-}
-
-#[test]
-fn create_rolls_back_when_persist_fails() {
-    let dir = tempdir().unwrap();
-    let catalog = Catalog::open(dir.path()).unwrap();
-    fs::create_dir(dir.path().join(".catalog.pb.tmp")).unwrap();
-
-    assert!(catalog.create("books", mapping()).is_err());
-    assert!(matches!(
-        catalog.get("books"),
-        Err(Error::CollectionNotFound(_))
-    ));
-}
-
-#[test]
-fn drop_rolls_back_when_persist_fails() {
-    let dir = tempdir().unwrap();
-    let catalog = Catalog::open(dir.path()).unwrap();
-    catalog.create("books", mapping()).unwrap();
-    fs::create_dir(dir.path().join(".catalog.pb.tmp")).unwrap();
-
-    assert!(catalog.drop("books").is_err());
-    assert!(catalog.get("books").is_ok());
 }

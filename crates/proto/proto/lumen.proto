@@ -25,6 +25,7 @@ message DeleteDocument {
 message CreateCollection {
   string collection = 1;
   Mapping mapping = 2;
+  string uuid = 3;
 }
 
 message DropCollection {
