@@ -1018,12 +1018,16 @@ version = "0.1.0"
 name = "lumen-cluster"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "lumen-core",
  "lumen-proto",
  "openraft",
  "prost",
  "tempfile",
  "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
 ]
 
 [[package]]
