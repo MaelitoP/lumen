@@ -46,22 +46,23 @@ impl StateMachine {
     pub fn catalog(&self) -> &Catalog {
         &self.inner.catalog
     }
+}
 
-    /// Returns the last log id that is safe to report as applied.
-    ///
-    /// When collections have committed data, the catalog decides the applied
-    /// point. When only blank or membership entries were applied, there is no
-    /// collection state yet, so we fall back to the in-memory value.
-    ///
-    /// The caller must hold state.
-    fn applied_log_id(&self, state: &SmState) -> Result<Option<LogId<u64>>, StorageError<u64>> {
-        Ok(
-            match self.inner.catalog.min_committed_mark().map_err(read_sm)? {
-                Some(mark) => Some(to_log_id(mark)),
-                None => state.last_applied,
-            },
-        )
-    }
+/// Returns the last log id that is safe to report as applied.
+///
+/// When collections have committed data, the catalog decides the applied
+/// point. When only blank or membership entries were applied, there is no
+/// collection state yet, so we fall back to the in-memory value.
+///
+/// The caller must hold state.
+fn applied_log_id(
+    catalog: &Catalog,
+    state: &SmState,
+) -> Result<Option<LogId<u64>>, StorageError<u64>> {
+    Ok(match catalog.min_committed_mark().map_err(read_sm)? {
+        Some(mark) => Some(to_log_id(mark)),
+        None => state.last_applied,
+    })
 }
 
 impl RaftStateMachine<TypeConfig> for StateMachine {
@@ -71,7 +72,10 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         &mut self,
     ) -> Result<(Option<LogId<u64>>, StoredMembership<u64, Node>), StorageError<u64>> {
         let state = self.inner.state.lock().expect("sm poisoned");
-        Ok((self.applied_log_id(&state)?, state.last_membership.clone()))
+        Ok((
+            applied_log_id(&self.inner.catalog, &state)?,
+            state.last_membership.clone(),
+        ))
     }
 
     async fn apply<I>(&mut self, entries: I) -> Result<Vec<Response>, StorageError<u64>>
@@ -79,37 +83,42 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         I: IntoIterator<Item = Entry<TypeConfig>> + OptionalSend,
         I::IntoIter: OptionalSend,
     {
-        let mut state = self.inner.state.lock().expect("sm poisoned");
-        let mut responses = Vec::new();
-        for entry in entries {
-            let log_id = entry.log_id;
-            state.last_applied = Some(log_id);
-            let response = match entry.payload {
-                EntryPayload::Blank => Response::default(),
-                EntryPayload::Membership(membership) => {
-                    state.last_membership = StoredMembership::new(Some(log_id), membership);
-                    Response::default()
-                }
-                EntryPayload::Normal(command) => {
-                    let mark = LogMark {
-                        term: log_id.leader_id.term,
-                        node: log_id.leader_id.node_id,
-                        index: log_id.index,
-                    };
-                    let outcome = self
-                        .inner
-                        .catalog
-                        .apply_command(mark, &command)
-                        .map_err(|e| apply_err(log_id, e))?;
-                    Response {
-                        id: outcome.id,
-                        created: outcome.created,
+        let entries: Vec<Entry<TypeConfig>> = entries.into_iter().collect();
+        let inner = Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || {
+            let mut state = inner.state.lock().expect("sm poisoned");
+            let mut responses = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let log_id = entry.log_id;
+                state.last_applied = Some(log_id);
+                let response = match entry.payload {
+                    EntryPayload::Blank => Response::default(),
+                    EntryPayload::Membership(membership) => {
+                        state.last_membership = StoredMembership::new(Some(log_id), membership);
+                        Response::default()
                     }
-                }
-            };
-            responses.push(response);
-        }
-        Ok(responses)
+                    EntryPayload::Normal(command) => {
+                        let mark = LogMark {
+                            term: log_id.leader_id.term,
+                            node: log_id.leader_id.node_id,
+                            index: log_id.index,
+                        };
+                        let outcome = inner
+                            .catalog
+                            .apply_command(mark, &command)
+                            .map_err(|e| apply_err(log_id, e))?;
+                        Response {
+                            id: outcome.id,
+                            created: outcome.created,
+                        }
+                    }
+                };
+                responses.push(response);
+            }
+            Ok(responses)
+        })
+        .await
+        .map_err(join_err)?
     }
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
@@ -129,20 +138,26 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         snapshot: Box<tokio::fs::File>,
     ) -> Result<(), StorageError<u64>> {
         let mut received = snapshot.into_std().await;
-        received.seek(SeekFrom::Start(0)).map_err(io_sm)?;
-        let mut staged = tempfile::NamedTempFile::new().map_err(io_sm)?;
-        std::io::copy(&mut received, staged.as_file_mut()).map_err(io_sm)?;
-        staged.as_file().sync_all().map_err(io_sm)?;
+        let inner = Arc::clone(&self.inner);
+        let meta = meta.clone();
+        tokio::task::spawn_blocking(move || {
+            received.seek(SeekFrom::Start(0)).map_err(io_sm)?;
+            let mut staged = tempfile::NamedTempFile::new().map_err(io_sm)?;
+            std::io::copy(&mut received, staged.as_file_mut()).map_err(io_sm)?;
+            staged.as_file().sync_all().map_err(io_sm)?;
 
-        self.inner
-            .catalog
-            .install_snapshot(staged.path())
-            .map_err(write_sm)?;
-        let mut state = self.inner.state.lock().expect("sm poisoned");
-        state.last_applied = meta.last_log_id;
-        state.last_membership = meta.last_membership.clone();
-        state.current_snapshot = Some(meta.clone());
-        Ok(())
+            inner
+                .catalog
+                .install_snapshot(staged.path())
+                .map_err(write_sm)?;
+            let mut state = inner.state.lock().expect("sm poisoned");
+            state.last_applied = meta.last_log_id;
+            state.last_membership = meta.last_membership.clone();
+            state.current_snapshot = Some(meta);
+            Ok(())
+        })
+        .await
+        .map_err(join_err)?
     }
 
     async fn get_current_snapshot(
@@ -168,22 +183,25 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
 
 impl RaftSnapshotBuilder<TypeConfig> for StateMachine {
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<u64>> {
-        // Build the archive and read the applied point while holding the same lock.
-        //
-        // This keeps `last_log_id` in sync with the data in the archive. Without the
-        // lock, a concurrent `apply` could move one forward without the other.
-        let (path, meta) = {
-            let mut state = self.inner.state.lock().expect("sm poisoned");
-            let path = self.inner.catalog.build_snapshot().map_err(write_sm)?;
-            let last_log_id = self.applied_log_id(&state)?;
+        let inner = Arc::clone(&self.inner);
+        // Build the archive and read the applied point while holding the same lock,
+        // synchronously inside the blocking task. This keeps `last_log_id` in sync
+        // with the data in the archive. Without the lock, a concurrent `apply` could
+        // move one forward without the other.
+        let (path, meta) = tokio::task::spawn_blocking(move || {
+            let mut state = inner.state.lock().expect("sm poisoned");
+            let path = inner.catalog.build_snapshot().map_err(write_sm)?;
+            let last_log_id = applied_log_id(&inner.catalog, &state)?;
             let meta = SnapshotMeta {
                 last_log_id,
                 last_membership: state.last_membership.clone(),
                 snapshot_id: snapshot_id(last_log_id),
             };
             state.current_snapshot = Some(meta.clone());
-            (path, meta)
-        };
+            Ok::<_, StorageError<u64>>((path, meta))
+        })
+        .await
+        .map_err(join_err)??;
         let file = tokio::fs::File::open(&path).await.map_err(io_sm)?;
         Ok(Snapshot {
             meta,
@@ -221,6 +239,10 @@ fn write_sm(e: lumen_core::Error) -> StorageError<u64> {
 }
 
 fn io_sm(e: std::io::Error) -> StorageError<u64> {
+    StorageIOError::write_state_machine(AnyError::new(&e)).into()
+}
+
+fn join_err(e: tokio::task::JoinError) -> StorageError<u64> {
     StorageIOError::write_state_machine(AnyError::new(&e)).into()
 }
 
