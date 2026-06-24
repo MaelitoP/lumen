@@ -28,7 +28,7 @@ use crate::LumenRaft;
 
 const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct NetworkFactory;
 
 impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
@@ -42,6 +42,7 @@ impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
     }
 }
 
+#[derive(Debug)]
 pub struct Client {
     node: Node,
     channel: Option<Channel>,
@@ -222,6 +223,12 @@ fn chunk_stream(
 #[derive(Clone)]
 pub struct RaftServer {
     raft: LumenRaft,
+}
+
+impl std::fmt::Debug for RaftServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RaftServer").finish_non_exhaustive()
+    }
 }
 
 impl RaftServer {

@@ -209,7 +209,7 @@ impl Catalog {
         let parsed: Value = serde_json::from_slice(source)
             .map_err(|e| Error::Validation(format!("invalid JSON: {e}")))?;
         target.mapping().validate_document(&parsed)?;
-        let id = id.map_or_else(|| Uuid::new_v4().to_string(), str::to_owned);
+        let id = or_new_id(id);
 
         let mut wal = self.wal.lock().expect("write lock poisoned");
         let seq = self.next_seq();
@@ -243,6 +243,83 @@ impl Catalog {
             }),
         ))?;
         target.apply_delete(id)
+    }
+
+    /// Validates and builds a `CreateCollection` command; does not write the WAL
+    /// or apply it.
+    ///
+    /// `None` means the collection already exists with the same mapping (a
+    /// committed no-op). The caller replicates and applies the command.
+    pub fn build_create_command(
+        &self,
+        name: &str,
+        mapping: Mapping,
+    ) -> Result<Option<proto::Command>> {
+        validate_name(name)?;
+        match self.get(name) {
+            Ok(existing) if existing.mapping() == &mapping => return Ok(None),
+            Ok(_) => {
+                return Err(Error::SchemaConflict {
+                    name: name.to_owned(),
+                })
+            }
+            Err(Error::CollectionNotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
+        Ok(Some(command(proto::command::Op::CreateCollection(
+            proto::CreateCollection {
+                collection: name.to_owned(),
+                uuid: Uuid::new_v4().to_string(),
+                mapping: Some(mapping.into()),
+            },
+        ))))
+    }
+
+    /// Validates and builds an `IndexDocument` command, minting `_id` when absent;
+    /// does not write the WAL or apply it.
+    ///
+    /// The minted `_id` is baked into the command so every replica applies the
+    /// same id. The caller replicates and applies the command.
+    pub fn build_index_command(
+        &self,
+        collection: &str,
+        id: Option<&str>,
+        source: &[u8],
+    ) -> Result<proto::Command> {
+        let target = self.get(collection)?;
+        let parsed: Value = serde_json::from_slice(source)
+            .map_err(|e| Error::Validation(format!("invalid JSON: {e}")))?;
+        target.mapping().validate_document(&parsed)?;
+        Ok(command(proto::command::Op::IndexDocument(
+            proto::IndexDocument {
+                collection: collection.to_owned(),
+                id: or_new_id(id),
+                source: source.to_vec(),
+            },
+        )))
+    }
+
+    /// Builds a `DeleteDocument` command, erroring if the collection is absent;
+    /// does not write the WAL or apply it.
+    pub fn build_delete_command(&self, collection: &str, id: &str) -> Result<proto::Command> {
+        self.get(collection)?;
+        Ok(command(proto::command::Op::DeleteDocument(
+            proto::DeleteDocument {
+                collection: collection.to_owned(),
+                id: id.to_owned(),
+            },
+        )))
+    }
+
+    /// Builds a `DropCollection` command, erroring if the collection is absent;
+    /// does not write the WAL or apply it.
+    pub fn build_drop_command(&self, name: &str) -> Result<proto::Command> {
+        self.get(name)?;
+        Ok(command(proto::command::Op::DropCollection(
+            proto::DropCollection {
+                collection: name.to_owned(),
+            },
+        )))
     }
 
     /// Applies a committed `Command` without writing it to the WAL.
@@ -289,6 +366,19 @@ impl Catalog {
     /// owns the log.
     pub fn checkpoint_applied(&self, mark: LogMark) -> Result<()> {
         self.commit_all(mark)
+    }
+
+    /// Commits one collection through `mark` if it is behind, making applied but
+    /// uncommitted writes searchable.
+    ///
+    /// The linearizable read path uses this so a get reflects writes that were
+    /// applied (buffered) but not yet committed by the periodic checkpoint.
+    pub fn commit_collection(&self, name: &str, mark: LogMark) -> Result<()> {
+        let target = self.get(name)?;
+        if target.committed_mark()?.unwrap_or_default().index < mark.index {
+            target.commit(mark)?;
+        }
+        Ok(())
     }
 
     /// Builds a snapshot archive and returns its path.
@@ -423,9 +513,11 @@ impl Catalog {
             match map.get(&create.collection) {
                 Some(existing) if existing.collection.mapping() == &mapping => return Ok(()),
                 Some(_) => {
-                    return Err(Error::SchemaConflict {
-                        name: create.collection.clone(),
-                    })
+                    tracing::error!(
+                        collection = %create.collection,
+                        "committed create conflicts with existing mapping; keeping existing",
+                    );
+                    return Ok(());
                 }
                 None => {}
             }
@@ -613,8 +705,16 @@ impl Catalog {
 fn wal_entry(seq: u64, op: proto::command::Op) -> proto::WalEntry {
     proto::WalEntry {
         seq,
-        command: Some(proto::Command { op: Some(op) }),
+        command: Some(command(op)),
     }
+}
+
+fn command(op: proto::command::Op) -> proto::Command {
+    proto::Command { op: Some(op) }
+}
+
+fn or_new_id(id: Option<&str>) -> String {
+    id.map_or_else(|| Uuid::new_v4().to_string(), str::to_owned)
 }
 
 fn validate_name(name: &str) -> Result<()> {

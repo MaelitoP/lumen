@@ -32,7 +32,7 @@ async fn start_node_with(id: NodeId, config: Config) -> TestNode {
     let dir = TempDir::new().unwrap();
     let catalog = Catalog::open(dir.path().join("state")).unwrap();
     let sm = StateMachine::new(catalog);
-    let log_store = LogStore::open(&dir.path().join("log")).unwrap();
+    let log_store = LogStore::open(&dir.path().join("raft")).unwrap();
 
     let config = Arc::new(
         Config {

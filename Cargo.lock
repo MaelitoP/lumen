@@ -997,8 +997,10 @@ name = "lumen-api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "clap",
+ "lumen-cluster",
  "lumen-core",
  "serde",
  "serde_json",
@@ -1018,16 +1020,21 @@ version = "0.1.0"
 name = "lumen-cluster"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "futures",
  "lumen-core",
  "lumen-proto",
  "openraft",
  "prost",
+ "serde",
+ "serde_json",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-stream",
  "tonic",
  "tonic-prost",
+ "tracing",
 ]
 
 [[package]]

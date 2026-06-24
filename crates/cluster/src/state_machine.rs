@@ -282,12 +282,56 @@ mod tests {
         })
     }
 
+    fn create_books_conflicting() -> proto::command::Op {
+        proto::command::Op::CreateCollection(proto::CreateCollection {
+            collection: "books".to_string(),
+            uuid: "22222222-2222-2222-2222-222222222222".to_string(),
+            mapping: Some(proto::Mapping {
+                fields: vec![proto::Field {
+                    name: "title".to_string(),
+                    r#type: proto::FieldType::Keyword as i32,
+                    indexed: true,
+                    fast: false,
+                }],
+            }),
+        })
+    }
+
     fn index(id: &str, title: &str) -> proto::command::Op {
         proto::command::Op::IndexDocument(proto::IndexDocument {
             collection: "books".to_string(),
             id: id.to_string(),
             source: format!(r#"{{"title":"{title}"}}"#).into_bytes(),
         })
+    }
+
+    #[tokio::test]
+    async fn conflicting_committed_create_applies_as_total_noop() {
+        use std::collections::BTreeMap;
+
+        use lumen_core::{FieldSpec, FieldType, Mapping};
+
+        let dir = TempDir::new().unwrap();
+        let mut sm = StateMachine::new(Catalog::open(dir.path().join("state")).unwrap());
+
+        sm.apply([
+            normal(1, 1, create_books()),
+            normal(1, 2, create_books_conflicting()),
+        ])
+        .await
+        .expect("apply must stay total over a committed conflicting create");
+
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "title".to_string(),
+            FieldSpec {
+                ty: FieldType::Text,
+                indexed: true,
+                fast: false,
+            },
+        );
+        let original = Mapping::new(fields).unwrap();
+        assert_eq!(sm.catalog().describe("books").unwrap(), original);
     }
 
     #[tokio::test]

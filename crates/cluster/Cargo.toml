@@ -9,11 +9,16 @@ lumen-core = { path = "../core" }
 lumen-proto = { path = "../proto", features = ["grpc"] }
 openraft = { version = "0.9.24", features = ["storage-v2"] }
 prost = "0.14"
-tokio = { version = "1", features = ["fs", "io-util", "rt"] }
+tokio = { version = "1", features = ["fs", "io-util", "rt", "net", "time", "sync"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "=0.14.3"
 tonic-prost = "=0.14.3"
 futures = "0.3"
 tempfile = "3"
+thiserror = "1"
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
 
 [dev-dependencies]
 lumen-core = { path = "../core" }
@@ -21,3 +26,4 @@ lumen-proto = { path = "../proto" }
 openraft = { version = "0.9.24", features = ["storage-v2"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
 tokio-stream = { version = "0.1", features = ["net"] }
+serde_json = "1"

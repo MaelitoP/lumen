@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::Bytes;
@@ -6,7 +5,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use lumen_core::{Catalog, Mapping, SearchResults, Value};
+use lumen_core::{Mapping, SearchResults, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -21,19 +20,19 @@ pub(crate) async fn create_collection(
 ) -> Result<impl IntoResponse, ApiError> {
     let mapping: Mapping =
         serde_json::from_slice(&body).map_err(|e| ApiError::Mapping(e.to_string()))?;
-    let created = run(state.catalog, move |c| c.create(&name, mapping)).await?;
-    let status = if created.created {
+    let outcome = state.engine.create_collection(name, mapping).await?;
+    let status = if outcome.created {
         StatusCode::CREATED
     } else {
         StatusCode::OK
     };
-    Ok((status, Json(created.collection.mapping().clone())))
+    Ok((status, Json(outcome.mapping)))
 }
 
 pub(crate) async fn list_collections(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let collections = run(state.catalog, |c| Ok(c.list())).await?;
+    let collections = state.engine.list().await?;
     Ok(Json(ListResponse { collections }))
 }
 
@@ -41,7 +40,7 @@ pub(crate) async fn describe_collection(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let mapping = run(state.catalog, move |c| c.describe(&name)).await?;
+    let mapping = state.engine.describe(name).await?;
     Ok(Json(mapping))
 }
 
@@ -49,7 +48,7 @@ pub(crate) async fn drop_collection(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    run(state.catalog, move |c| c.drop_collection(&name)).await?;
+    state.engine.drop_collection(name).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -58,14 +57,8 @@ pub(crate) async fn index_document(
     Path(name): Path<String>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
-    let upserted = run(state.catalog, move |c| {
-        c.upsert_document(&name, None, &body)
-    })
-    .await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(index_response(&upserted.id, true)),
-    ))
+    let outcome = state.engine.index(name, None, body).await?;
+    Ok((StatusCode::CREATED, Json(index_response(&outcome.id, true))))
 }
 
 pub(crate) async fn put_document(
@@ -73,16 +66,13 @@ pub(crate) async fn put_document(
     Path((name, id)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
-    let upserted = run(state.catalog, move |c| {
-        c.upsert_document(&name, Some(&id), &body)
-    })
-    .await?;
-    let status = if upserted.created {
+    let outcome = state.engine.index(name, Some(id), body).await?;
+    let status = if outcome.created {
         StatusCode::CREATED
     } else {
         StatusCode::OK
     };
-    Ok((status, Json(index_response(&upserted.id, upserted.created))))
+    Ok((status, Json(index_response(&outcome.id, outcome.created))))
 }
 
 pub(crate) async fn get_document(
@@ -90,7 +80,7 @@ pub(crate) async fn get_document(
     Path((name, id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let response_id = id.clone();
-    let source = run(state.catalog, move |c| c.get_document(&name, &id)).await?;
+    let source = state.engine.get_document(name, id).await?;
     Ok(Json(GetResponse {
         id: response_id,
         source: parse_source(source)?,
@@ -101,7 +91,7 @@ pub(crate) async fn delete_document(
     State(state): State<AppState>,
     Path((name, id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    run(state.catalog, move |c| c.delete_document(&name, &id)).await?;
+    state.engine.delete(name, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -112,28 +102,10 @@ pub(crate) async fn search_documents(
 ) -> Result<impl IntoResponse, ApiError> {
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
     let offset = params.offset.unwrap_or(0);
-    let (results, elapsed) = run(state.catalog, move |c| {
-        let collection = c.get(&name)?;
-        let start = Instant::now();
-        let results = collection.search(&params.q, limit, offset)?;
-        Ok((results, start.elapsed()))
-    })
-    .await?;
-    Ok(Json(search_response(results, elapsed.as_millis() as u64)?))
-}
-
-async fn run<T, F>(catalog: Arc<Catalog>, f: F) -> Result<T, ApiError>
-where
-    F: FnOnce(&Catalog) -> lumen_core::Result<T> + Send + 'static,
-    T: Send + 'static,
-{
-    match tokio::task::spawn_blocking(move || f(&catalog)).await {
-        Ok(result) => result.map_err(ApiError::from),
-        Err(error) => {
-            tracing::error!(%error, "catalog task panicked");
-            Err(ApiError::Internal)
-        }
-    }
+    let start = Instant::now();
+    let results = state.engine.search(name, params.q, limit, offset).await?;
+    let took_ms = start.elapsed().as_millis() as u64;
+    Ok(Json(search_response(results, took_ms)?))
 }
 
 fn index_response(id: &str, created: bool) -> IndexResponse {
