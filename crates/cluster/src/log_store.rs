@@ -17,18 +17,19 @@ const LOG_DIR: &str = "log";
 const META_FILE: &str = "raft-meta.pb";
 const META_TMP: &str = ".raft-meta.pb.tmp";
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LogStore {
     inner: Arc<Inner>,
 }
 
+#[derive(Debug)]
 struct Inner {
     dir: PathBuf,
     log: Mutex<SegmentedLog>,
     meta: Mutex<Meta>,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct Meta {
     vote: Option<Vote<u64>>,
     committed: Option<LogId<u64>>,

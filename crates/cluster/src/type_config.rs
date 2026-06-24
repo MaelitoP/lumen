@@ -1,5 +1,3 @@
-use std::io::Cursor; // used by declare_raft_types! below
-
 pub use lumen_proto::raft::Node;
 use lumen_proto::v1::Command;
 
@@ -17,15 +15,31 @@ openraft::declare_raft_types!(
         R = Response,
         NodeId = u64,
         Node = Node,
+        SnapshotData = tokio::fs::File,
 );
 
 pub type LumenRaft = openraft::Raft<TypeConfig>;
+
+/// Returns the Raft config used by Lumen.
+///
+/// Snapshots are built every 1000 log entries so a lagging follower can catch up
+/// from a snapshot instead of replaying an unbounded log tail.
+///
+/// Keep `replication_lag_threshold` above the snapshot interval. If it is lower,
+/// openraft may try to send log entries that were already purged instead of
+/// sending a snapshot.
+pub fn raft_config() -> openraft::Config {
+    openraft::Config {
+        snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(1000),
+        max_in_snapshot_log_to_keep: 1000,
+        ..Default::default()
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::fmt::Debug;
-    use std::io::Cursor;
     use std::ops::RangeBounds;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -194,14 +208,16 @@ mod tests {
 
         async fn begin_receiving_snapshot(
             &mut self,
-        ) -> Result<Box<Cursor<Vec<u8>>>, StorageError<u64>> {
-            Ok(Box::new(Cursor::new(Vec::new())))
+        ) -> Result<Box<tokio::fs::File>, StorageError<u64>> {
+            Ok(Box::new(tokio::fs::File::from_std(
+                tempfile::tempfile().expect("tempfile"),
+            )))
         }
 
         async fn install_snapshot(
             &mut self,
             meta: &SnapshotMeta<u64, Node>,
-            _snapshot: Box<Cursor<Vec<u8>>>,
+            _snapshot: Box<tokio::fs::File>,
         ) -> Result<(), StorageError<u64>> {
             let mut inner = self.inner.lock().unwrap();
             inner.last_applied = meta.last_log_id;
@@ -228,7 +244,9 @@ mod tests {
                     last_membership,
                     snapshot_id: "mem".to_string(),
                 },
-                snapshot: Box::new(Cursor::new(Vec::new())),
+                snapshot: Box::new(tokio::fs::File::from_std(
+                    tempfile::tempfile().expect("tempfile"),
+                )),
             })
         }
     }
@@ -287,7 +305,7 @@ mod tests {
         let config = Arc::new(
             Config {
                 cluster_name: "lumen-test".to_string(),
-                ..Default::default()
+                ..raft_config()
             }
             .validate()
             .unwrap(),

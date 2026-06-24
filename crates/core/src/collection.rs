@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,6 +11,9 @@ use tantivy::query::TermQuery;
 use tantivy::schema::{IndexRecordOption, Term};
 use tantivy::{Index, IndexReader, IndexWriter};
 use uuid::Uuid;
+
+const META_FILE: &str = "meta.json";
+const MANAGED_FILE: &str = ".managed.json";
 
 use crate::document::build_doc;
 use crate::error::{Error, Result};
@@ -45,6 +49,7 @@ pub struct LogMark {
 
 pub struct Collection {
     uuid: Uuid,
+    dir: PathBuf,
     mapping: Mapping,
     index: Index,
     writer: Mutex<IndexWriter>,
@@ -56,24 +61,52 @@ impl Collection {
         let dir = collection_dir(root, uuid);
         fs::create_dir(&dir)?;
         let index = Index::create_in_dir(&dir, mapping.to_schema())?;
-        Self::from_index(uuid, mapping, index)
+        Self::from_index(uuid, dir, mapping, index)
     }
 
     pub(crate) fn open(root: &Path, uuid: Uuid, mapping: Mapping) -> Result<Self> {
-        let index = Index::open_in_dir(collection_dir(root, uuid))?;
-        Self::from_index(uuid, mapping, index)
+        let dir = collection_dir(root, uuid);
+        let index = Index::open_in_dir(&dir)?;
+        Self::from_index(uuid, dir, mapping, index)
     }
 
-    fn from_index(uuid: Uuid, mapping: Mapping, index: Index) -> Result<Self> {
+    fn from_index(uuid: Uuid, dir: PathBuf, mapping: Mapping, index: Index) -> Result<Self> {
         let writer = index.writer(WRITER_HEAP_BYTES)?;
         let reader = index.reader()?;
         Ok(Self {
             uuid,
+            dir,
             mapping,
             index,
             writer: Mutex::new(writer),
             reader,
         })
+    }
+
+    /// Copies the files from the latest Tantivy commit into `dest`.
+    ///
+    /// Holding a searcher pins the committed segment files while they are copied, so
+    /// a background merge cannot remove them during the archive.
+    pub(crate) fn archive_into(&self, dest: &Path) -> Result<()> {
+        self.reader.reload()?;
+        let _pin = self.reader.searcher();
+        let meta = self.index.load_metas()?;
+
+        let mut files: HashSet<PathBuf> = HashSet::new();
+        files.insert(PathBuf::from(META_FILE));
+        files.insert(PathBuf::from(MANAGED_FILE));
+        for segment in &meta.segments {
+            files.extend(segment.list_files());
+        }
+
+        fs::create_dir_all(dest)?;
+        for rel in files {
+            let from = self.dir.join(&rel);
+            if from.exists() {
+                fs::copy(&from, dest.join(&rel))?;
+            }
+        }
+        Ok(())
     }
 
     pub fn uuid(&self) -> Uuid {

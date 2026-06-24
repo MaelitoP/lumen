@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use std::io::{Seek, SeekFrom};
 use std::sync::{Arc, Mutex};
 
 use lumen_core::{Catalog, LogMark};
@@ -12,30 +12,25 @@ use crate::type_config::{Node, Response, TypeConfig};
 
 /// Applies committed Raft commands to the local catalog.
 ///
-/// Snapshots only include catalog metadata, such as collections and mappings.
-/// They do not include indexed documents. Keep `SnapshotPolicy::Never` enabled:
-/// installing one of these snapshots on a live node would replace its catalog
-/// state without restoring its documents.
-#[derive(Clone)]
+/// Snapshots contain the catalog metadata and all Tantivy files for each
+/// collection. Installing a snapshot replaces the local state, so a follower
+/// that is too far behind can catch up without replaying old log entries.
+#[derive(Clone, Debug)]
 pub struct StateMachine {
     inner: Arc<Inner>,
 }
 
+#[derive(Debug)]
 struct Inner {
     catalog: Catalog,
     state: Mutex<SmState>,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct SmState {
     last_applied: Option<LogId<u64>>,
     last_membership: StoredMembership<u64, Node>,
-    current_snapshot: Option<StoredSnapshot>,
-}
-
-struct StoredSnapshot {
-    meta: SnapshotMeta<u64, Node>,
-    data: Vec<u8>,
+    current_snapshot: Option<SnapshotMeta<u64, Node>>,
 }
 
 impl StateMachine {
@@ -123,55 +118,76 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
 
     async fn begin_receiving_snapshot(
         &mut self,
-    ) -> Result<Box<Cursor<Vec<u8>>>, StorageError<u64>> {
-        Ok(Box::new(Cursor::new(Vec::new())))
+    ) -> Result<Box<tokio::fs::File>, StorageError<u64>> {
+        let file = tempfile::tempfile().map_err(io_sm)?;
+        Ok(Box::new(tokio::fs::File::from_std(file)))
     }
 
     async fn install_snapshot(
         &mut self,
         meta: &SnapshotMeta<u64, Node>,
-        snapshot: Box<Cursor<Vec<u8>>>,
+        snapshot: Box<tokio::fs::File>,
     ) -> Result<(), StorageError<u64>> {
-        let data = snapshot.into_inner();
+        let mut received = snapshot.into_std().await;
+        received.seek(SeekFrom::Start(0)).map_err(io_sm)?;
+        let mut staged = tempfile::NamedTempFile::new().map_err(io_sm)?;
+        std::io::copy(&mut received, staged.as_file_mut()).map_err(io_sm)?;
+        staged.as_file().sync_all().map_err(io_sm)?;
+
+        self.inner
+            .catalog
+            .install_snapshot(staged.path())
+            .map_err(write_sm)?;
         let mut state = self.inner.state.lock().expect("sm poisoned");
-        self.inner.catalog.import_state(&data).map_err(write_sm)?;
         state.last_applied = meta.last_log_id;
         state.last_membership = meta.last_membership.clone();
-        state.current_snapshot = Some(StoredSnapshot {
-            meta: meta.clone(),
-            data,
-        });
+        state.current_snapshot = Some(meta.clone());
         Ok(())
     }
 
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<TypeConfig>>, StorageError<u64>> {
-        let state = self.inner.state.lock().expect("sm poisoned");
-        Ok(state.current_snapshot.as_ref().map(|stored| Snapshot {
-            meta: stored.meta.clone(),
-            snapshot: Box::new(Cursor::new(stored.data.clone())),
+        let meta = self
+            .inner
+            .state
+            .lock()
+            .expect("sm poisoned")
+            .current_snapshot
+            .clone();
+        let (Some(meta), Some(path)) = (meta, self.inner.catalog.current_snapshot()) else {
+            return Ok(None);
+        };
+        let file = tokio::fs::File::open(&path).await.map_err(io_sm)?;
+        Ok(Some(Snapshot {
+            meta,
+            snapshot: Box::new(file),
         }))
     }
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for StateMachine {
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<u64>> {
-        let mut state = self.inner.state.lock().expect("sm poisoned");
-        let data = self.inner.catalog.export_state().map_err(write_sm)?;
-        let last_log_id = self.applied_log_id(&state)?;
-        let meta = SnapshotMeta {
-            last_log_id,
-            last_membership: state.last_membership.clone(),
-            snapshot_id: snapshot_id(&last_log_id),
+        // Build the archive and read the applied point while holding the same lock.
+        //
+        // This keeps `last_log_id` in sync with the data in the archive. Without the
+        // lock, a concurrent `apply` could move one forward without the other.
+        let (path, meta) = {
+            let mut state = self.inner.state.lock().expect("sm poisoned");
+            let path = self.inner.catalog.build_snapshot().map_err(write_sm)?;
+            let last_log_id = self.applied_log_id(&state)?;
+            let meta = SnapshotMeta {
+                last_log_id,
+                last_membership: state.last_membership.clone(),
+                snapshot_id: snapshot_id(last_log_id),
+            };
+            state.current_snapshot = Some(meta.clone());
+            (path, meta)
         };
-        state.current_snapshot = Some(StoredSnapshot {
-            meta: meta.clone(),
-            data: data.clone(),
-        });
+        let file = tokio::fs::File::open(&path).await.map_err(io_sm)?;
         Ok(Snapshot {
             meta,
-            snapshot: Box::new(Cursor::new(data)),
+            snapshot: Box::new(file),
         })
     }
 }
@@ -180,12 +196,14 @@ fn to_log_id(mark: LogMark) -> LogId<u64> {
     LogId::new(CommittedLeaderId::new(mark.term, mark.node), mark.index)
 }
 
-fn snapshot_id(last_log_id: &Option<LogId<u64>>) -> String {
+fn snapshot_id(last_log_id: Option<LogId<u64>>) -> String {
     match last_log_id {
-        Some(id) => format!(
-            "{}-{}-{}",
-            id.leader_id.term, id.leader_id.node_id, id.index
-        ),
+        Some(id) => {
+            let term = id.leader_id.term;
+            let node = id.leader_id.node_id;
+            let index = id.index;
+            format!("{term}-{node}-{index}")
+        }
         None => "init".to_string(),
     }
 }
@@ -199,6 +217,10 @@ fn read_sm(e: lumen_core::Error) -> StorageError<u64> {
 }
 
 fn write_sm(e: lumen_core::Error) -> StorageError<u64> {
+    StorageIOError::write_state_machine(AnyError::new(&e)).into()
+}
+
+fn io_sm(e: std::io::Error) -> StorageError<u64> {
     StorageIOError::write_state_machine(AnyError::new(&e)).into()
 }
 
@@ -338,6 +360,57 @@ mod tests {
                 .unwrap()
                 .total,
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn follower_catches_up_via_snapshot_install() {
+        let leader_dir = TempDir::new().unwrap();
+        let mut leader = StateMachine::new(Catalog::open(leader_dir.path().join("state")).unwrap());
+        leader
+            .apply([
+                normal(1, 1, create_books()),
+                normal(1, 2, index("b1", "alpha")),
+                normal(1, 3, index("b2", "beta")),
+            ])
+            .await
+            .unwrap();
+        leader
+            .catalog()
+            .checkpoint_applied(LogMark {
+                term: 1,
+                node: 0,
+                index: 3,
+            })
+            .unwrap();
+
+        let snapshot = leader
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+
+        let follower_dir = TempDir::new().unwrap();
+        let mut follower =
+            StateMachine::new(Catalog::open(follower_dir.path().join("state")).unwrap());
+        let mut received = follower.begin_receiving_snapshot().await.unwrap();
+        *received = *snapshot.snapshot;
+        follower
+            .install_snapshot(&snapshot.meta, received)
+            .await
+            .unwrap();
+
+        let books = follower.catalog().get("books").unwrap();
+        assert_eq!(books.search("alpha", 10, 0).unwrap().total, 1);
+        assert_eq!(books.search("beta", 10, 0).unwrap().total, 1);
+        assert_eq!(
+            follower.applied_state().await.unwrap().0,
+            Some(to_log_id(LogMark {
+                term: 1,
+                node: 0,
+                index: 3
+            })),
         );
     }
 }

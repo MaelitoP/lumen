@@ -19,6 +19,8 @@ use crate::wal::Wal;
 const SNAPSHOT_FILE: &str = "catalog.pb";
 const SNAPSHOT_TMP: &str = ".catalog.pb.tmp";
 const QUARANTINE_DIR: &str = "_quarantine";
+const SNAPSHOTS_DIR: &str = "_snapshots";
+const CURRENT_SNAPSHOT: &str = "current.tar";
 const MAX_NAME_LEN: usize = 255;
 
 #[derive(Debug)]
@@ -133,13 +135,7 @@ impl Catalog {
             }
         }
 
-        let live: HashSet<Uuid> = catalog.collections().values().map(|e| e.uuid).collect();
-        let high = catalog.seq.load(Ordering::Relaxed);
-        for uuid in collection_dirs(&catalog.root)? {
-            if !live.contains(&uuid) {
-                quarantine(&catalog.root, uuid, high)?;
-            }
-        }
+        catalog.sweep_orphans(catalog.seq.load(Ordering::Relaxed))?;
 
         if replayed {
             catalog.checkpoint()?;
@@ -295,45 +291,94 @@ impl Catalog {
         self.commit_all(mark)
     }
 
-    pub fn export_state(&self) -> Result<Vec<u8>> {
-        Ok(self
-            .snapshot_proto(self.seq.load(Ordering::Relaxed))
-            .encode_to_vec())
+    /// Builds a snapshot archive and returns its path.
+    ///
+    /// The archive contains `catalog.pb` and the Tantivy files for every collection.
+    /// Each collection is pinned while it is copied; see [`Collection::archive_into`].
+    ///
+    /// The caller is responsible for the snapshot metadata. In particular,
+    /// `meta.last_log_id` must not be ahead of the committed mark returned by
+    /// [`Self::min_committed_mark`].
+    pub fn build_snapshot(&self) -> Result<PathBuf> {
+        let snapshots = self.snapshots_dir()?;
+        let staging = snapshots.join("build");
+        reset_dir(&staging)?;
+
+        let applied_seq = self.seq.load(Ordering::Relaxed);
+        fs::write(
+            staging.join(SNAPSHOT_FILE),
+            self.snapshot_proto(applied_seq).encode_to_vec(),
+        )?;
+        {
+            let map = self.collections();
+            for entry in map.values() {
+                entry
+                    .collection
+                    .archive_into(&staging.join(entry.uuid.to_string()))?;
+            }
+        }
+
+        let tmp = snapshots.join(".current.tar.tmp");
+        {
+            let mut builder = tar::Builder::new(File::create(&tmp)?);
+            builder.append_dir_all(".", &staging)?;
+            fsync(&builder.into_inner()?)?;
+        }
+        let current = snapshots.join(CURRENT_SNAPSHOT);
+        fs::rename(&tmp, &current)?;
+        fsync_dir(&snapshots)?;
+        fs::remove_dir_all(&staging)?;
+        Ok(current)
     }
 
-    /// Replaces the catalog from a serialized snapshot.
+    /// Installs a snapshot archive and replaces the local catalog.
     ///
-    /// The snapshot contains collection names, UUIDs, and mappings. It does not
-    /// contain Tantivy index data, so collection directories must already exist
-    /// for non-empty imports.
-    pub fn import_state(&self, bytes: &[u8]) -> Result<()> {
-        let snapshot = proto::CatalogSnapshot::decode(bytes)
-            .map_err(|e| Error::Recovery(format!("corrupt catalog snapshot on import: {e}")))?;
-        let mut rebuilt = HashMap::with_capacity(snapshot.entries.len());
-        for entry in snapshot.entries {
-            let uuid = Uuid::parse_str(&entry.uuid)
-                .map_err(|_| Error::Recovery(format!("invalid uuid {:?} on import", entry.uuid)))?;
-            let mapping =
-                Mapping::try_from(entry.mapping.ok_or_else(|| {
-                    Error::Recovery(format!("import entry {uuid} has no mapping"))
-                })?)?;
-            let dir = self.root.join(uuid.to_string());
-            let collection = if dir.exists() {
-                Collection::open(&self.root, uuid, mapping)?
-            } else {
-                Collection::create(&self.root, uuid, mapping)?
-            };
-            rebuilt.insert(
-                entry.name,
-                Entry {
-                    uuid,
-                    created_seq: entry.created_seq,
-                    collection: Arc::new(collection),
-                },
-            );
+    /// The install is ordered so `catalog.pb` is renamed last. A crash before that
+    /// rename keeps the old catalog active; any already-copied collection dirs are
+    /// treated as orphans and quarantined on the next open. A crash after the rename
+    /// leaves the new catalog with its collection dirs already in place.
+    pub fn install_snapshot(&self, archive: &Path) -> Result<()> {
+        let snapshots = self.snapshots_dir()?;
+        let staging = snapshots.join("install");
+        reset_dir(&staging)?;
+        tar::Archive::new(File::open(archive)?).unpack(&staging)?;
+        fsync_dir(&staging)?;
+
+        let snapshot =
+            proto::CatalogSnapshot::decode(fs::read(staging.join(SNAPSHOT_FILE))?.as_slice())
+                .map_err(|e| {
+                    Error::Recovery(format!("corrupt catalog snapshot in archive: {e}"))
+                })?;
+
+        let aside = snapshots.join("aside");
+        reset_dir(&aside)?;
+        for entry in &snapshot.entries {
+            let uuid = Uuid::parse_str(&entry.uuid).map_err(|_| {
+                Error::Recovery(format!("invalid uuid {:?} in archive", entry.uuid))
+            })?;
+            let dst = self.root.join(uuid.to_string());
+            if dst.exists() {
+                fs::rename(&dst, aside.join(uuid.to_string()))?;
+            }
+            fs::rename(staging.join(uuid.to_string()), &dst)?;
         }
-        *self.collections() = rebuilt;
-        self.persist(snapshot.applied_seq)
+        fsync_dir(&self.root)?;
+
+        fs::rename(staging.join(SNAPSHOT_FILE), self.root.join(SNAPSHOT_FILE))?;
+        fsync_dir(&self.root)?;
+
+        self.rebuild(&snapshot)?;
+        self.sweep_orphans(snapshot.applied_seq)?;
+        self.publish_snapshot(archive, &snapshots)?;
+
+        let _ = fs::remove_dir_all(&aside);
+        let _ = fs::remove_dir_all(&staging);
+        Ok(())
+    }
+
+    pub fn current_snapshot(&self) -> Option<PathBuf> {
+        let path = self.root.join(SNAPSHOTS_DIR).join(CURRENT_SNAPSHOT);
+        path.exists().then_some(path)
     }
 
     pub fn checkpoint(&self) -> Result<()> {
@@ -471,6 +516,55 @@ impl Catalog {
         Ok(())
     }
 
+    fn rebuild(&self, snapshot: &proto::CatalogSnapshot) -> Result<()> {
+        let mut rebuilt = HashMap::with_capacity(snapshot.entries.len());
+        let mut max_seq = snapshot.applied_seq;
+        for entry in &snapshot.entries {
+            let uuid = Uuid::parse_str(&entry.uuid).map_err(|_| {
+                Error::Recovery(format!("invalid uuid {:?} in archive", entry.uuid))
+            })?;
+            let mapping =
+                Mapping::try_from(entry.mapping.clone().ok_or_else(|| {
+                    Error::Recovery(format!("archive entry {uuid} has no mapping"))
+                })?)?;
+            max_seq = max_seq.max(entry.created_seq);
+            rebuilt.insert(
+                entry.name.clone(),
+                Entry {
+                    uuid,
+                    created_seq: entry.created_seq,
+                    collection: Arc::new(Collection::open(&self.root, uuid, mapping)?),
+                },
+            );
+        }
+        *self.collections() = rebuilt;
+        self.seq.store(max_seq, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn sweep_orphans(&self, high: u64) -> Result<()> {
+        let live: HashSet<Uuid> = self.collections().values().map(|e| e.uuid).collect();
+        for uuid in collection_dirs(&self.root)? {
+            if !live.contains(&uuid) {
+                quarantine(&self.root, uuid, high)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn snapshots_dir(&self) -> Result<PathBuf> {
+        let dir = self.root.join(SNAPSHOTS_DIR);
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    fn publish_snapshot(&self, archive: &Path, snapshots: &Path) -> Result<()> {
+        let tmp = snapshots.join(".current.tar.tmp");
+        fs::copy(archive, &tmp)?;
+        fs::rename(&tmp, snapshots.join(CURRENT_SNAPSHOT))?;
+        fsync_dir(snapshots)
+    }
+
     fn commit_all(&self, mark: LogMark) -> Result<()> {
         {
             let map = self.collections();
@@ -568,6 +662,14 @@ fn write_snapshot(root: &Path, snapshot: &proto::CatalogSnapshot) -> Result<()> 
 
 fn fsync_dir(path: &Path) -> Result<()> {
     File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+fn reset_dir(dir: &Path) -> Result<()> {
+    if dir.exists() {
+        fs::remove_dir_all(dir)?;
+    }
+    fs::create_dir_all(dir)?;
     Ok(())
 }
 
