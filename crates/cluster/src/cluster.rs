@@ -181,18 +181,9 @@ impl Cluster {
     }
 
     pub fn metrics(&self) -> ClusterMetrics {
-        let m: RaftMetrics<NodeId, Node> = self.raft.metrics().borrow().clone();
-        let membership = m.membership_config.membership();
-        ClusterMetrics {
-            id: m.id,
-            current_term: m.current_term,
-            state: server_state(m.state).to_string(),
-            current_leader: m.current_leader,
-            last_log_index: m.last_log_index,
-            last_applied_index: m.last_applied.map(|l| l.index),
-            voters: membership.voter_ids().collect(),
-            members: membership.nodes().map(|(id, _)| *id).collect(),
-        }
+        let metrics = self.raft.metrics();
+        let borrowed = metrics.borrow();
+        to_cluster_metrics(&borrowed)
     }
 
     pub fn id(&self) -> NodeId {
@@ -205,11 +196,27 @@ impl Cluster {
 
     pub async fn wait_for_leader(&self, timeout: Duration) -> anyhow::Result<NodeId> {
         let metrics = self
-            .raft
-            .wait(Some(timeout))
-            .metrics(|m| m.current_leader.is_some(), "leader elected")
+            .wait_until(timeout, |m| m.current_leader.is_some())
             .await?;
         Ok(metrics.current_leader.expect("leader present after wait"))
+    }
+
+    /// Awaits a metrics condition or times out; the predicate sees the same
+    /// [`ClusterMetrics`] that [`Self::metrics`] returns.
+    pub async fn wait_until(
+        &self,
+        timeout: Duration,
+        cond: impl Fn(&ClusterMetrics) -> bool + Send,
+    ) -> anyhow::Result<ClusterMetrics> {
+        let metrics = self
+            .raft
+            .wait(Some(timeout))
+            .metrics(
+                move |m| cond(&to_cluster_metrics(m)),
+                "wait_until condition",
+            )
+            .await?;
+        Ok(to_cluster_metrics(&metrics))
     }
 
     pub async fn create_collection(
@@ -430,6 +437,20 @@ fn server_state(state: ServerState) -> &'static str {
         ServerState::Candidate => "candidate",
         ServerState::Leader => "leader",
         ServerState::Shutdown => "shutdown",
+    }
+}
+
+fn to_cluster_metrics(m: &RaftMetrics<NodeId, Node>) -> ClusterMetrics {
+    let membership = m.membership_config.membership();
+    ClusterMetrics {
+        id: m.id,
+        current_term: m.current_term,
+        state: server_state(m.state).to_string(),
+        current_leader: m.current_leader,
+        last_log_index: m.last_log_index,
+        last_applied_index: m.last_applied.map(|l| l.index),
+        voters: membership.voter_ids().collect(),
+        members: membership.nodes().map(|(id, _)| *id).collect(),
     }
 }
 
