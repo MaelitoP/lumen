@@ -1,12 +1,15 @@
-use std::io::{Seek, SeekFrom};
+use std::io::{Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use lumen_core::{Catalog, LogMark};
+use lumen_proto::raft;
 use openraft::storage::{RaftSnapshotBuilder, RaftStateMachine, Snapshot};
 use openraft::{
     AnyError, CommittedLeaderId, Entry, EntryPayload, LogId, OptionalSend, SnapshotMeta,
     StorageError, StorageIOError, StoredMembership,
 };
+use prost::Message;
 
 use crate::type_config::{Node, Response, TypeConfig};
 
@@ -23,6 +26,7 @@ pub struct StateMachine {
 #[derive(Debug)]
 struct Inner {
     catalog: Catalog,
+    meta_dir: PathBuf,
     state: Mutex<SmState>,
 }
 
@@ -34,13 +38,21 @@ struct SmState {
 }
 
 impl StateMachine {
-    pub fn new(catalog: Catalog) -> Self {
-        Self {
+    /// Loads the persisted `last_membership` from `dir` so a restarted node
+    /// rejoins as a voter rather than an empty learner.
+    pub fn open(catalog: Catalog, dir: &Path) -> Result<Self, StorageError<u64>> {
+        std::fs::create_dir_all(dir).map_err(io_sm)?;
+        let last_membership = load_membership(dir)?;
+        Ok(Self {
             inner: Arc::new(Inner {
                 catalog,
-                state: Mutex::new(SmState::default()),
+                meta_dir: dir.to_path_buf(),
+                state: Mutex::new(SmState {
+                    last_membership,
+                    ..Default::default()
+                }),
             }),
-        }
+        })
     }
 
     pub fn catalog(&self) -> &Catalog {
@@ -94,7 +106,9 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
                 let response = match entry.payload {
                     EntryPayload::Blank => Response::default(),
                     EntryPayload::Membership(membership) => {
-                        state.last_membership = StoredMembership::new(Some(log_id), membership);
+                        let stored = StoredMembership::new(Some(log_id), membership);
+                        persist_membership(&inner.meta_dir, &stored)?;
+                        state.last_membership = stored;
                         Response::default()
                     }
                     EntryPayload::Normal(command) => {
@@ -150,6 +164,7 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
                 .catalog
                 .install_snapshot(staged.path())
                 .map_err(write_sm)?;
+            persist_membership(&inner.meta_dir, &meta.last_membership)?;
             let mut state = inner.state.lock().expect("sm poisoned");
             state.last_applied = meta.last_log_id;
             state.last_membership = meta.last_membership.clone();
@@ -226,8 +241,45 @@ fn snapshot_id(last_log_id: Option<LogId<u64>>) -> String {
     }
 }
 
+const MEMBERSHIP_FILE: &str = "membership.pb";
+const MEMBERSHIP_TMP: &str = ".membership.pb.tmp";
+
+fn load_membership(dir: &Path) -> Result<StoredMembership<u64, Node>, StorageError<u64>> {
+    let bytes = match std::fs::read(dir.join(MEMBERSHIP_FILE)) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(StoredMembership::default())
+        }
+        Err(e) => return Err(read_sm_io(e)),
+    };
+    let proto = raft::StoredMembership::decode(bytes.as_slice()).map_err(read_sm_io)?;
+    proto.try_into().map_err(read_sm_io)
+}
+
+fn persist_membership(
+    dir: &Path,
+    membership: &StoredMembership<u64, Node>,
+) -> Result<(), StorageError<u64>> {
+    let proto: raft::StoredMembership = membership.clone().into();
+    let tmp = dir.join(MEMBERSHIP_TMP);
+    {
+        let mut file = std::fs::File::create(&tmp).map_err(io_sm)?;
+        file.write_all(&proto.encode_to_vec()).map_err(io_sm)?;
+        file.sync_all().map_err(io_sm)?;
+    }
+    std::fs::rename(&tmp, dir.join(MEMBERSHIP_FILE)).map_err(io_sm)?;
+    std::fs::File::open(dir)
+        .map_err(io_sm)?
+        .sync_all()
+        .map_err(io_sm)
+}
+
 fn apply_err(log_id: LogId<u64>, e: lumen_core::Error) -> StorageError<u64> {
     StorageIOError::apply(log_id, AnyError::new(&e)).into()
+}
+
+fn read_sm_io(e: impl std::error::Error + 'static) -> StorageError<u64> {
+    StorageIOError::read_state_machine(AnyError::new(&e)).into()
 }
 
 fn read_sm(e: lumen_core::Error) -> StorageError<u64> {
@@ -305,6 +357,10 @@ mod tests {
         })
     }
 
+    fn open_sm(base: &Path) -> StateMachine {
+        StateMachine::open(Catalog::open(base.join("state")).unwrap(), base).unwrap()
+    }
+
     #[tokio::test]
     async fn conflicting_committed_create_applies_as_total_noop() {
         use std::collections::BTreeMap;
@@ -312,7 +368,7 @@ mod tests {
         use lumen_core::{FieldSpec, FieldType, Mapping};
 
         let dir = TempDir::new().unwrap();
-        let mut sm = StateMachine::new(Catalog::open(dir.path().join("state")).unwrap());
+        let mut sm = open_sm(dir.path());
 
         sm.apply([
             normal(1, 1, create_books()),
@@ -337,10 +393,9 @@ mod tests {
     #[tokio::test]
     async fn command_stream_survives_restart_without_loss_or_double_effect() {
         let dir = TempDir::new().unwrap();
-        let state = dir.path().join("state");
 
         {
-            let mut sm = StateMachine::new(Catalog::open(&state).unwrap());
+            let mut sm = open_sm(dir.path());
             sm.apply([
                 normal(1, 1, create_books()),
                 normal(1, 2, index("b1", "alpha")),
@@ -373,7 +428,7 @@ mod tests {
             );
         }
 
-        let mut sm = StateMachine::new(Catalog::open(&state).unwrap());
+        let mut sm = open_sm(dir.path());
         let books = sm.catalog().get("books").unwrap();
         assert_eq!(books.search("alpha", 10, 0).unwrap().total, 1);
         assert_eq!(books.search("beta", 10, 0).unwrap().total, 1);
@@ -390,7 +445,7 @@ mod tests {
     #[tokio::test]
     async fn re_applying_committed_entries_is_idempotent() {
         let dir = TempDir::new().unwrap();
-        let mut sm = StateMachine::new(Catalog::open(dir.path().join("state")).unwrap());
+        let mut sm = open_sm(dir.path());
         sm.apply([
             normal(1, 1, create_books()),
             normal(1, 2, index("b1", "alpha")),
@@ -432,7 +487,7 @@ mod tests {
     #[tokio::test]
     async fn follower_catches_up_via_snapshot_install() {
         let leader_dir = TempDir::new().unwrap();
-        let mut leader = StateMachine::new(Catalog::open(leader_dir.path().join("state")).unwrap());
+        let mut leader = open_sm(leader_dir.path());
         leader
             .apply([
                 normal(1, 1, create_books()),
@@ -458,8 +513,7 @@ mod tests {
             .unwrap();
 
         let follower_dir = TempDir::new().unwrap();
-        let mut follower =
-            StateMachine::new(Catalog::open(follower_dir.path().join("state")).unwrap());
+        let mut follower = open_sm(follower_dir.path());
         let mut received = follower.begin_receiving_snapshot().await.unwrap();
         *received = *snapshot.snapshot;
         follower

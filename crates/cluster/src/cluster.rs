@@ -94,8 +94,9 @@ pub struct Cluster {
 impl Cluster {
     pub async fn start(opts: ClusterOptions) -> anyhow::Result<Arc<Self>> {
         let catalog = Catalog::open(opts.data_dir.join(STATE_DIR))?;
-        let sm = StateMachine::new(catalog);
-        let log_store = LogStore::open(&opts.data_dir.join(RAFT_DIR))?;
+        let raft_dir = opts.data_dir.join(RAFT_DIR);
+        let sm = StateMachine::open(catalog, &raft_dir)?;
+        let log_store = LogStore::open(&raft_dir)?;
 
         let config = Arc::new(
             Config {
@@ -360,11 +361,11 @@ impl Cluster {
     }
 
     fn forward_or_unavailable(&self, metrics: &RaftMetrics<NodeId, Node>) -> ClientError {
-        match metrics.current_leader {
-            Some(leader) => match metrics.membership_config.membership().get_node(&leader) {
-                Some(node) => ClientError::ForwardToLeader(Some(node.clone())),
-                None => ClientError::Unavailable,
-            },
+        let Some(leader) = metrics.current_leader else {
+            return ClientError::Unavailable;
+        };
+        match metrics.membership_config.membership().get_node(&leader) {
+            Some(node) => ClientError::ForwardToLeader(Some(node.clone())),
             None => ClientError::Unavailable,
         }
     }

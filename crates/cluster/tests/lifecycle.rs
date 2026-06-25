@@ -163,6 +163,39 @@ async fn follower_write_redirects_and_linearizable_get_reflects_leader_write() {
 }
 
 #[tokio::test]
+async fn follower_linearizable_get_redirects_to_leader() {
+    let n1 = start(1).await;
+    let n2 = start(2).await;
+
+    n1.cluster.init(None).await.unwrap();
+    n1.cluster.wait_for_leader(TIMEOUT).await.unwrap();
+    n1.cluster
+        .add_learner(2, n2.cluster.raft_addr().to_string())
+        .await
+        .unwrap();
+    n1.cluster
+        .change_membership([1, 2].into_iter().collect(), false)
+        .await
+        .unwrap();
+    n2.cluster
+        .wait_until(TIMEOUT, |m| m.current_leader == Some(1))
+        .await
+        .unwrap();
+
+    let err = n2
+        .cluster
+        .linearizable_get("books", "b1")
+        .await
+        .unwrap_err();
+    match err {
+        ClientError::ForwardToLeader(Some(node)) => assert_eq!(node.node_id, 1),
+        other => panic!("expected ForwardToLeader(node 1), got {other:?}"),
+    }
+
+    shutdown([n1, n2]).await;
+}
+
+#[tokio::test]
 async fn killing_the_leader_reelects_redirects_and_the_killed_node_rejoins() {
     let dir1 = TempDir::new().unwrap();
     let n1 = start_on(1, dir1.path().to_path_buf(), "127.0.0.1:0".to_string()).await;
@@ -232,7 +265,11 @@ async fn killing_the_leader_reelects_redirects_and_the_killed_node_rejoins() {
     let target = leader.cluster.metrics().last_applied_index.unwrap();
     let rejoined = start_on(1, dir1.path().to_path_buf(), addr1).await;
     rejoined
-        .wait_until(TIMEOUT, move |m| m.last_applied_index >= Some(target))
+        .wait_until(TIMEOUT, move |m| {
+            m.last_applied_index >= Some(target)
+                && m.voters.contains(&1)
+                && m.current_leader.is_some()
+        })
         .await
         .unwrap();
 

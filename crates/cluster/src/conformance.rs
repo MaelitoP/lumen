@@ -13,7 +13,8 @@ impl StoreBuilder<TypeConfig, LogStore, StateMachine, TempDir> for Builder {
         let dir = TempDir::new().map_err(setup_err)?;
         let log_store = LogStore::open(dir.path())?;
         let catalog = Catalog::open(dir.path().join("state")).map_err(setup_err)?;
-        Ok((dir, log_store, StateMachine::new(catalog)))
+        let sm = StateMachine::open(catalog, dir.path())?;
+        Ok((dir, log_store, sm))
     }
 }
 

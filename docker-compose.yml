@@ -1,6 +1,6 @@
 # Three-node Lumen Raft cluster demo.
 #
-#   docker compose up --build -d        # build, start 3 nodes, auto-form the cluster
+#   docker compose up --build -d         # build, start 3 nodes, auto-form the cluster
 #   curl localhost:7701/cluster/metrics  # find the leader (node1 leads initially)
 #
 # App ports: node1 -> 7701, node2 -> 7702, node3 -> 7703 (raft port 8080 is internal).
@@ -15,13 +15,13 @@
 #   curl localhost:7701/collections/books/documents/b1
 #
 # Kill-the-leader demo:
-#   docker compose stop node1                     # kill the leader
+#   docker compose stop node1                      # kill the leader
 #   curl localhost:7702/cluster/metrics            # a new leader (2 or 3) is elected
 #   curl -X PUT localhost:770X/collections/books/documents/b2 ...   # write to the new leader
 #   docker compose start node1                     # node1 rejoins and catches up
 #   curl localhost:7701/cluster/metrics            # last_applied_index catches up
 #
-# Reset everything (wipe persisted state): docker compose down -v
+# Reset everything: docker compose down -v
 
 name: lumen-cluster-demo
 

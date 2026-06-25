@@ -461,8 +461,11 @@ impl Catalog {
         self.sweep_orphans(snapshot.applied_seq)?;
         self.publish_snapshot(archive, &snapshots)?;
 
-        let _ = fs::remove_dir_all(&aside);
-        let _ = fs::remove_dir_all(&staging);
+        for leftover in [&aside, &staging] {
+            if let Err(e) = fs::remove_dir_all(leftover) {
+                tracing::warn!(error = %e, dir = %leftover.display(), "snapshot install cleanup failed");
+            }
+        }
         Ok(())
     }
 
