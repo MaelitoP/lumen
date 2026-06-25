@@ -1,0 +1,8 @@
+target/
+.git/
+.github/
+data/
+data*/
+**/data/
+docs/
+*.md

@@ -1,10 +1,86 @@
+# Three-node Lumen Raft cluster demo.
+#
+#   docker compose up --build -d        # build, start 3 nodes, auto-form the cluster
+#   curl localhost:7701/cluster/metrics  # find the leader (node1 leads initially)
+#
+# App ports: node1 -> 7701, node2 -> 7702, node3 -> 7703 (raft port 8080 is internal).
+# Writes and get-by-id must go to the leader; a follower answers 307 with the
+# leader's *raft* address, so target the leader's app port directly:
+#
+#   curl -X PUT localhost:7701/collections/books \
+#     -H 'content-type: application/json' \
+#     -d '{"fields":{"title":{"type":"text","indexed":true}}}'
+#   curl -X PUT localhost:7701/collections/books/documents/b1 \
+#     -H 'content-type: application/json' -d '{"title":"the hobbit"}'
+#   curl localhost:7701/collections/books/documents/b1
+#
+# Kill-the-leader demo:
+#   docker compose stop node1                     # kill the leader
+#   curl localhost:7702/cluster/metrics            # a new leader (2 or 3) is elected
+#   curl -X PUT localhost:770X/collections/books/documents/b2 ...   # write to the new leader
+#   docker compose start node1                     # node1 rejoins and catches up
+#   curl localhost:7701/cluster/metrics            # last_applied_index catches up
+#
+# Reset everything (wipe persisted state): docker compose down -v
+
+name: lumen-cluster-demo
+
+x-node: &node
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  networks: [lumen]
+
 services:
-  dev:
-    build:
-      context: .
-      dockerfile: Dockerfile.dev
-    volumes:
-      - .:/opt/lumen:cached
-    working_dir: /opt/lumen
-    entrypoint: ["sh", "-c"]
-    command: ["sleep infinity"]
+  node1:
+    <<: *node
+    command:
+      - cluster
+      - --id=1
+      - --raft-addr=0.0.0.0:8080
+      - --bind=0.0.0.0:7700
+      - --data-dir=/data
+      - --cluster-name=lumen-demo
+    ports: ["7701:7700"]
+    volumes: ["node1-data:/data"]
+
+  node2:
+    <<: *node
+    command:
+      - cluster
+      - --id=2
+      - --raft-addr=0.0.0.0:8080
+      - --bind=0.0.0.0:7700
+      - --data-dir=/data
+      - --cluster-name=lumen-demo
+    ports: ["7702:7700"]
+    volumes: ["node2-data:/data"]
+
+  node3:
+    <<: *node
+    command:
+      - cluster
+      - --id=3
+      - --raft-addr=0.0.0.0:8080
+      - --bind=0.0.0.0:7700
+      - --data-dir=/data
+      - --cluster-name=lumen-demo
+    ports: ["7703:7700"]
+    volumes: ["node3-data:/data"]
+
+  bootstrap:
+    image: curlimages/curl:latest
+    depends_on: [node1, node2, node3]
+    networks: [lumen]
+    restart: "no"
+    volumes: ["./docker/bootstrap.sh:/bootstrap.sh:ro"]
+    entrypoint: ["sh", "/bootstrap.sh"]
+
+networks:
+  lumen:
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:

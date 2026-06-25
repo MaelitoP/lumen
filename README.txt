@@ -19,4 +19,6 @@ Run the test suite with cargo. On macOS, Tantivy’s zstd-sys needs libiconv, so
     export LIBRARY_PATH="$(brew --prefix libiconv)/lib"
     cargo test --workspace
 
+A three-node cluster runs under Docker Compose with no local toolchain. "docker compose up --build -d" builds the image, starts node1, node2, and node3 (app ports 7701, 7702, 7703), and a one-shot bootstrap service forms the Raft group. Find the leader with "curl localhost:7701/cluster/metrics" and send writes to its app port; then "docker compose stop node1" to watch a new leader take over and "docker compose start node1" to watch the old one rejoin and catch up. docker-compose.yml has the full walkthrough.
+
 Licensed under Apache-2.0; see LICENSE.
